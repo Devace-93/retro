@@ -26,5 +26,21 @@ export default defineConfig({
     trace: "on-first-retry",
     screenshot: "only-on-failure",
   },
-  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
+  projects: [
+    {
+      name: "chromium",
+      use: {
+        ...devices["Desktop Chrome"],
+        // The widget specs load /widget.js into a page on another loopback origin.
+        // Chrome's Private/Local Network Access checks block (or prompt for) such
+        // loopback requests, which headless can only deny; real customer sites on
+        // the public internet reaching retro.3m4.net are not affected.
+        launchOptions: {
+          args: [
+            "--disable-features=PrivateNetworkAccessChecks,PrivateNetworkAccessPermissionPrompt,PrivateNetworkAccessSendPreflights,LocalNetworkAccessChecks,LocalNetworkAccessPermissionPrompt",
+          ],
+        },
+      },
+    },
+  ],
 });

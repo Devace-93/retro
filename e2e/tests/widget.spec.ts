@@ -8,7 +8,10 @@ import { createProject, listFeedback, registerAccount, WIDGET_URL } from "../hel
  * host URL instead) and loads /widget.js from the running stack; the widget
  * calls the API cross-origin exactly like a customer site would.
  */
-const HOST_URL = "https://host.example/app/editor";
+// A loopback origin that is NOT the app: Chrome blocks public-origin pages from
+// fetching loopback resources (Private Network Access), so a host.example page
+// could never load /widget.js from localhost. page.route serves it, port unused.
+const HOST_URL = "http://127.0.0.1:9/app/editor";
 
 function hostPage(projectKey: string, extraAttrs = ""): string {
   return `<!doctype html>
@@ -85,7 +88,7 @@ test.describe("widget", () => {
     const dialog = w.getByRole("dialog");
     await expect(dialog).toBeVisible();
     await expect(dialog.getByRole("textbox", { name: /email/i })).toHaveValue("known@example.com");
-    await dialog.getByRole("textbox", { name: /message|describe/i }).fill("Keyboard shortcuts please");
+    await dialog.getByRole("textbox", { name: /message|what happened|describe/i }).fill("Keyboard shortcuts please");
     await dialog.getByRole("button", { name: /send|submit/i }).click();
     await expect(dialog.getByText(/#1\b/)).toBeVisible();
 

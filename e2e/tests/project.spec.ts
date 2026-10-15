@@ -18,25 +18,26 @@ test.describe("projects", () => {
 
     // Lands on the project (inbox) page; go to settings.
     await expect(page).toHaveURL(/\/dashboard\/projects\/[0-9a-f-]+/);
-    const projectUrl = page.url().replace(/\/$/, "");
+    // Creating lands on the project settings page; derive the project id from the URL.
+    const projectId = page.url().match(/\/dashboard\/projects\/([0-9a-f-]+)/)![1];
+    const projectUrl = `/dashboard/projects/${projectId}`;
     await page.goto(`${projectUrl}/settings`);
 
     // Public key + snippet with the real key.
-    const key = page.locator("[data-public-key]");
+    const key = page.getByTestId("public-key");
     await expect(key).toBeVisible();
-    const publicKey = (await key.getAttribute("data-public-key")) ?? "";
+    const publicKey = ((await key.textContent()) ?? "").trim();
     expect(publicKey).toMatch(/^retro_pub_/);
     await expect(page.locator("pre, code").filter({ hasText: publicKey }).first()).toBeVisible();
     await expect(page.locator("pre, code").filter({ hasText: "widget.js" }).first()).toBeVisible();
 
     // Enable the public board.
-    const boardToggle = page.getByRole("switch", { name: /public board/i });
+    const boardToggle = page.getByRole("switch", { name: /board enabled/i });
     await expect(boardToggle).toHaveAttribute("aria-checked", "false");
     await boardToggle.click();
     await expect(boardToggle).toHaveAttribute("aria-checked", "true");
 
     // The API agrees and the board answers.
-    const projectId = projectUrl.split("/").pop()!;
     const res = await request.get(`${API_URL}/projects/${projectId}`, { headers: jwtHeaders(account) });
     expect(res.status()).toBe(200);
     const project = await res.json();

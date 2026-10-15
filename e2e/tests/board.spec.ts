@@ -57,8 +57,8 @@ test.describe("public board", () => {
     await expect(page.getByText("Unreleased draft")).toHaveCount(0);
 
     // Submit an idea from the board → arrives as a feature request with source board.
+    // The submission form is inline at the bottom of the board (no button to open it).
     await page.goto(`/b/${project.board_slug}`);
-    await page.getByRole("button", { name: /submit|suggest|idea/i }).first().click();
     await page.getByLabel(/message|idea|describe/i).first().fill("Please add keyboard shortcuts");
     await page.getByRole("button", { name: /send|submit/i }).last().click();
     await expect(page.getByText(/thank/i)).toBeVisible();

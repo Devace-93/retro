@@ -35,7 +35,7 @@ def create_app() -> Flask:
     try:
         from flask_cors import CORS
 
-        public_origins = {"origins": "*", "supports_credentials": False,
+        public_origins = {"origins": "*", "supports_credentials": False, "send_wildcard": True,
                           "allow_headers": ["Content-Type", "X-Project-Key", "X-Retro-Source", "Authorization"]}
         CORS(
             app,
