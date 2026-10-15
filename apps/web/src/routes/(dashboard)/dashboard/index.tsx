@@ -1,21 +1,15 @@
-import {
-  component$,
-  useContext,
-  useStore,
-  useVisibleTask$,
-  $,
-} from "@builder.io/qwik";
+import { component$, useContext, useStore, useVisibleTask$, $ } from "@builder.io/qwik";
 import { Link, useNavigate, type DocumentHead } from "@builder.io/qwik-city";
 import { api, ApiRequestError } from "../../../lib/api";
 import { capture } from "../../../lib/analytics";
 import { errorMessage, isLimitError } from "../../../lib/errors";
-import { slugify } from "../../../lib/flag-values";
+import { fmtBytes, slugify } from "../../../lib/feedback";
 import { UsageBar } from "../../../components/usage-bar";
 import { EarlyAccessBanner } from "../../../components/early-access-banner";
 import { Modal } from "../../../components/modal";
 import { FeaturesContext } from "../../../lib/features";
 import { tr, useI18n } from "../../../i18n";
-import type { Environment, MeResponse, Project } from "../../../lib/types";
+import type { MeResponse, Project } from "../../../lib/types";
 
 export default component$(() => {
   const nav = useNavigate();
@@ -34,13 +28,11 @@ export default component$(() => {
     name: "",
     key: "",
     keyTouched: false,
+    url: "",
     description: "",
     submitting: false,
     error: "",
     limitReached: false,
-    /** Set after a successful POST: the dialog switches to the one-time keys step. */
-    created: null as Project | null,
-    copiedEnv: "",
   });
 
   const load = $(async () => {
@@ -74,17 +66,18 @@ export default component$(() => {
       const project = await api.createProject({
         name: form.name.trim(),
         key: form.key.trim() || undefined,
+        url: form.url.trim() || undefined,
         description: form.description.trim() || undefined,
       });
       capture("project_created");
+      form.open = false;
       form.name = "";
       form.key = "";
       form.keyTouched = false;
+      form.url = "";
       form.description = "";
-      state.projects = [project, ...state.projects];
-      api.me().then((me) => (state.me = me)).catch(() => {});
-      // Client keys come back exactly once (never on GET), so show them here.
-      form.created = project;
+      // Land on settings: that is where the public key and install snippets live.
+      await nav(`/dashboard/projects/${project.id}/settings`);
     } catch (e) {
       form.limitReached = isLimitError(e);
       form.error = errorMessage(i18n, e, "dash.createFailed");
@@ -93,19 +86,8 @@ export default component$(() => {
     }
   });
 
-  const copyEnvKey = $(async (env: Environment) => {
-    try {
-      await navigator.clipboard.writeText(env.client_key ?? "");
-      form.copiedEnv = env.id;
-      setTimeout(() => (form.copiedEnv = ""), 1500);
-    } catch {
-      /* clipboard unavailable */
-    }
-  });
-
   const closeDialog = $(() => {
     form.open = false;
-    form.created = null;
     form.error = "";
   });
 
@@ -113,10 +95,11 @@ export default component$(() => {
   const usage = state.me?.usage;
   const q = state.q.trim().toLowerCase();
   const visible = q
-    ? state.projects.filter((p) => `${p.name} ${p.key} ${p.description ?? ""}`.toLowerCase().includes(q))
+    ? state.projects.filter((p) => `${p.name} ${p.key} ${p.description ?? ""} ${p.url ?? ""}`.toLowerCase().includes(q))
     : state.projects;
-  const evalLimit = limits?.evaluations_per_month ?? -1;
-  const overage = !!usage && evalLimit >= 0 && usage.evaluations > evalLimit;
+  const feedbackLimit = limits?.feedback_per_month ?? -1;
+  const overage = !!usage && feedbackLimit >= 0 && usage.feedback > feedbackLimit;
+  const storageLimitBytes = limits && limits.attachment_storage_mb >= 0 ? limits.attachment_storage_mb * 1024 * 1024 : -1;
 
   return (
     <div class="mx-auto max-w-6xl px-4 py-8">
@@ -130,8 +113,7 @@ export default component$(() => {
                 <span>{tr(i18n, "dash.earlyAccess")}</span>
               ) : (
                 <>
-                  <span class="capitalize">{state.me.account.plan}</span>{" "}
-                  {tr(i18n, "dash.planSuffix")}
+                  <span class="capitalize">{state.me.account.plan}</span> {tr(i18n, "dash.planSuffix")}
                 </>
               )}
             </p>
@@ -155,7 +137,7 @@ export default component$(() => {
 
       {/* Usage */}
       {limits && usage && (
-        <div class="mt-6 grid gap-6 sm:grid-cols-2">
+        <div class="mt-6 grid gap-6 sm:grid-cols-3">
           <div class="card p-5">
             <UsageBar
               label={tr(i18n, "dash.usageProjects")}
@@ -164,14 +146,28 @@ export default component$(() => {
             />
           </div>
           <div class="card p-5">
-            <UsageBar
-              label={tr(i18n, "dash.usageEvaluations")}
-              used={usage.evaluations}
-              limit={limits.evaluations_per_month}
-            />
-            {overage && (
-              <p class="mt-2 text-xs text-amber-700">{tr(i18n, "dash.evalOverage")}</p>
-            )}
+            <UsageBar label={tr(i18n, "dash.usageFeedback")} used={usage.feedback} limit={limits.feedback_per_month} />
+            {overage && <p class="mt-2 text-xs text-amber-700">{tr(i18n, "dash.feedbackOverage")}</p>}
+          </div>
+          <div class="card p-5">
+            <div class="mb-1 flex items-center justify-between text-sm">
+              <span class="font-medium text-slate-700">{tr(i18n, "dash.usageStorage")}</span>
+              <span class="text-slate-500">
+                {fmtBytes(usage.attachment_bytes ?? 0)} /{" "}
+                {storageLimitBytes < 0 ? tr(i18n, "plans.unlimited") : fmtBytes(storageLimitBytes)}
+              </span>
+            </div>
+            <div class="h-2 w-full overflow-hidden rounded-full bg-slate-100">
+              <div
+                class="h-full rounded-full bg-primary-600 transition-all"
+                style={{
+                  width:
+                    storageLimitBytes < 0
+                      ? "8%"
+                      : `${Math.min(100, Math.round(((usage.attachment_bytes ?? 0) / Math.max(storageLimitBytes, 1)) * 100))}%`,
+                }}
+              />
+            </div>
           </div>
         </div>
       )}
@@ -193,9 +189,7 @@ export default component$(() => {
       {/* Projects grid */}
       <div class="mt-6">
         {state.loading ? (
-          <div class="card p-10 text-center text-sm text-slate-400">
-            {tr(i18n, "common.loading")}
-          </div>
+          <div class="card p-10 text-center text-sm text-slate-400">{tr(i18n, "common.loading")}</div>
         ) : state.loadError ? (
           <div class="card p-10 text-center text-sm text-red-600">
             {state.loadError}{" "}
@@ -204,35 +198,28 @@ export default component$(() => {
             </button>
           </div>
         ) : state.projects.length === 0 ? (
-          <div class="card p-10 text-center text-sm text-slate-500">
-            {tr(i18n, "dash.empty")}
-          </div>
+          <div class="card p-10 text-center text-sm text-slate-500">{tr(i18n, "dash.empty")}</div>
         ) : visible.length === 0 ? (
-          <div class="card p-10 text-center text-sm text-slate-500">
-            {tr(i18n, "dash.noMatch")}
-          </div>
+          <div class="card p-10 text-center text-sm text-slate-500">{tr(i18n, "dash.noMatch")}</div>
         ) : (
           <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {visible.map((p) => (
-              <Link
-                key={p.id}
-                href={`/dashboard/projects/${p.id}`}
-                class="card flex flex-col p-5 hover:border-primary-300"
-              >
+              <Link key={p.id} href={`/dashboard/projects/${p.id}`} class="card flex flex-col p-5 hover:border-primary-300">
                 <div class="flex items-start justify-between gap-2">
                   <h2 class="font-semibold text-slate-900">{p.name}</h2>
                   <span class="font-mono text-xs text-slate-500">{p.key}</span>
                 </div>
-                {p.description && (
-                  <p class="mt-1 line-clamp-2 text-sm text-slate-600">{p.description}</p>
+                {(p.description || p.url) && (
+                  <p class="mt-1 line-clamp-2 text-sm text-slate-600">{p.description || p.url}</p>
                 )}
                 <div class="mt-4 flex flex-wrap items-center gap-2 text-xs text-slate-500">
-                  <span class="badge bg-primary-50 text-primary-700">
-                    {tr(i18n, "dash.flagsCount", { n: p.flag_count })}
-                  </span>
-                  <span class="badge bg-slate-100 text-slate-600">
-                    {tr(i18n, "dash.envsCount", { n: p.environments?.length ?? 0 })}
-                  </span>
+                  {p.counts.new > 0 ? (
+                    <span class="badge bg-primary-100 text-primary-800">{tr(i18n, "dash.newCount", { n: p.counts.new })}</span>
+                  ) : (
+                    <span class="badge bg-slate-100 text-slate-600">{tr(i18n, "dash.inboxZero")}</span>
+                  )}
+                  <span class="badge bg-slate-100 text-slate-600">{tr(i18n, "dash.feedbackCount", { n: p.counts.feedback })}</span>
+                  {p.board_enabled && <span class="badge bg-green-100 text-green-800">{tr(i18n, "dash.boardLive")}</span>}
                   <span class="ml-auto font-medium text-primary-600">{tr(i18n, "dash.openProject")}</span>
                 </div>
               </Link>
@@ -242,51 +229,13 @@ export default component$(() => {
       </div>
 
       {/* Create project dialog */}
-      <Modal
-        open={form.open}
-        title={form.created ? tr(i18n, "dash.keysTitle") : tr(i18n, "dash.newProject")}
-        onClose$={closeDialog}
-      >
-        {form.created ? (
-          <div data-testid="project-keys-step">
-            <div class="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-              {tr(i18n, "dash.keysWarning")}
-            </div>
-            <ul class="mt-4 space-y-3">
-              {(form.created.environments ?? []).map((env) => (
-                <li key={env.id} class="rounded-lg border border-slate-200 p-3">
-                  <div class="flex items-center justify-between text-sm">
-                    <span class="font-semibold text-slate-900">{env.name || env.key}</span>
-                    <span class="font-mono text-xs text-slate-500">{env.key}</span>
-                  </div>
-                  <div class="mt-2 flex items-center gap-2">
-                    <code class="flex-1 overflow-x-auto rounded bg-slate-100 px-2 py-1 text-xs text-slate-800">
-                      {env.client_key ?? `${env.client_key_prefix}…`}
-                    </code>
-                    {env.client_key && (
-                      <button type="button" class="btn-secondary px-2 py-1 text-xs" onClick$={() => copyEnvKey(env)}>
-                        {form.copiedEnv === env.id ? tr(i18n, "common.copied") : tr(i18n, "common.copy")}
-                      </button>
-                    )}
-                  </div>
-                </li>
-              ))}
-            </ul>
-            <div class="mt-4 flex justify-end">
-              <Link href={`/dashboard/projects/${form.created.id}`} class="btn-primary" onClick$={closeDialog}>
-                {tr(i18n, "dash.goToProject")}
-              </Link>
-            </div>
-          </div>
-        ) : (
+      <Modal open={form.open} title={tr(i18n, "dash.newProject")} onClose$={closeDialog}>
         <form class="space-y-4" preventdefault:submit onSubmit$={createProject}>
           {form.error && (
             <div
               class={[
                 "rounded-lg border px-3 py-2 text-sm",
-                form.limitReached
-                  ? "border-amber-300 bg-amber-50 text-amber-800"
-                  : "border-red-200 bg-red-50 text-red-700",
+                form.limitReached ? "border-amber-300 bg-amber-50 text-amber-800" : "border-red-200 bg-red-50 text-red-700",
               ]}
             >
               {form.error}{" "}
@@ -298,7 +247,9 @@ export default component$(() => {
             </div>
           )}
           <div>
-            <label class="label" for="pname">{tr(i18n, "dash.projectName")}</label>
+            <label class="label" for="pname">
+              {tr(i18n, "dash.projectName")}
+            </label>
             <input
               id="pname"
               type="text"
@@ -314,8 +265,7 @@ export default component$(() => {
           </div>
           <div>
             <label class="label" for="pkey">
-              {tr(i18n, "dash.projectKey")}{" "}
-              <span class="text-slate-400">{tr(i18n, "common.optional")}</span>
+              {tr(i18n, "dash.projectKey")} <span class="text-slate-400">{tr(i18n, "common.optional")}</span>
             </label>
             <input
               id="pkey"
@@ -332,17 +282,23 @@ export default component$(() => {
             <p class="mt-1 text-xs text-slate-400">{tr(i18n, "dash.projectKeyHint")}</p>
           </div>
           <div>
-            <label class="label" for="pdesc">
-              {tr(i18n, "dash.projectDescription")}{" "}
-              <span class="text-slate-400">{tr(i18n, "common.optional")}</span>
+            <label class="label" for="purl">
+              {tr(i18n, "dash.projectUrl")} <span class="text-slate-400">{tr(i18n, "common.optional")}</span>
             </label>
-            <textarea
-              id="pdesc"
+            <input
+              id="purl"
+              type="url"
               class="input"
-              rows={2}
-              value={form.description}
-              onInput$={(_, el) => (form.description = el.value)}
+              placeholder="https://myapp.example.com"
+              value={form.url}
+              onInput$={(_, el) => (form.url = el.value)}
             />
+          </div>
+          <div>
+            <label class="label" for="pdesc">
+              {tr(i18n, "dash.projectDescription")} <span class="text-slate-400">{tr(i18n, "common.optional")}</span>
+            </label>
+            <textarea id="pdesc" class="input" rows={2} value={form.description} onInput$={(_, el) => (form.description = el.value)} />
           </div>
           <div class="flex justify-end gap-2">
             <button type="button" class="btn-secondary" onClick$={closeDialog}>
@@ -353,7 +309,6 @@ export default component$(() => {
             </button>
           </div>
         </form>
-        )}
       </Modal>
     </div>
   );

@@ -3,5 +3,6 @@ Allow: /
 Disallow: /dashboard
 Disallow: /login
 Disallow: /signup
+Allow: /b/
 
 Sitemap: https://retro.3m4.net/sitemap.xml

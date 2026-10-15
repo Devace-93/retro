@@ -1,4 +1,4 @@
-/** Shared chrome: navigation, footer, language/theme controls. */
+/** Shared chrome: navigation, footer, language/theme controls, project tabs. */
 export const chrome = {
   // Shared chrome
   "nav.pricing": "Pricing",
@@ -26,6 +26,14 @@ export const chrome = {
   "ui.language": "Language",
   "ui.search": "Search",
   "ui.close": "Close",
+
+  // Project tabs (components/project-nav.tsx)
+  "pnav.back": "← All projects",
+  "pnav.inbox": "Inbox",
+  "pnav.roadmap": "Roadmap",
+  "pnav.changelog": "Changelog",
+  "pnav.settings": "Settings",
+  "pnav.openBoard": "Public board",
 
   // Plan/limit formatters (src/lib/plans.ts)
   "plans.unlimited": "Unlimited",

@@ -8,6 +8,7 @@ import {
 import { Link, type DocumentHead } from "@builder.io/qwik-city";
 import { PLANS, fmtLimit, fmtPrice, fmtRetention } from "../../../../lib/plans";
 import { api } from "../../../../lib/api";
+import { fmtStorage } from "../../../../components/pricing-table";
 import { capture } from "../../../../lib/analytics";
 import { FeaturesContext } from "../../../../lib/features";
 import { tr, useI18n } from "../../../../i18n";
@@ -253,9 +254,9 @@ export default component$(() => {
               </div>
               <ul class="mt-5 flex-1 space-y-2 text-sm text-slate-600">
                 <li>{tr(i18n, "billing.featProjects", { n: fmtLimit(plan.projects, i18n) })}</li>
-                <li>{tr(i18n, "billing.featEnvs", { n: fmtLimit(plan.environments_per_project, i18n) })}</li>
-                <li>{tr(i18n, "billing.featFlags", { n: fmtLimit(plan.flags_per_project, i18n) })}</li>
-                <li>{tr(i18n, "billing.featEvals", { n: fmtLimit(plan.evaluations_per_month, i18n) })}</li>
+                <li>{tr(i18n, "billing.featFeedback", { n: fmtLimit(plan.feedback_per_month, i18n) })}</li>
+                <li>{tr(i18n, "billing.featStorage", { n: plan.attachment_storage_mb < 0 ? fmtLimit(-1, i18n) : fmtStorage(plan.attachment_storage_mb) })}</li>
+                <li>{tr(i18n, "billing.featRoadmap", { n: fmtLimit(plan.roadmap_items_per_project, i18n) })}</li>
                 <li>{tr(i18n, "billing.featRetention", { n: fmtRetention(plan.audit_retention_days, i18n) })}</li>
                 <li>{tr(i18n, "billing.featUsers", { n: fmtLimit(plan.max_users, i18n) })}</li>
               </ul>

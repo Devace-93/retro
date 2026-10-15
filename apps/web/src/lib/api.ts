@@ -8,31 +8,30 @@
  * Throws `ApiRequestError` (carrying the parsed `error` body + HTTP status) so
  * callers can branch on e.g. 402 limit_reached (`error.which`).
  */
-import {
-  getAccessToken,
-  getRefreshToken,
-  setAccessToken,
-  clearTokens,
-} from "./auth";
+import { getAccessToken, getRefreshToken, setAccessToken, clearTokens } from "./auth";
 import type {
   ApiError,
   ApiKey,
   ApiKeyRole,
   AuditEvent,
   AuthResponse,
-  CopyResult,
-  Environment,
-  Evaluation,
-  Flag,
-  FlagKind,
-  FlagValue,
+  Board,
+  ChangelogEntry,
+  FeedbackItem,
+  FeedbackPatch,
+  FeedbackQuery,
+  FeedbackType,
+  IngestResponse,
   MeResponse,
-  OnConflict,
+  Note,
   Paginated,
   Project,
-  ProjectExport,
+  ProjectPatch,
+  PublicChangelogEntry,
+  RoadmapItem,
+  RoadmapStatus,
   RolesResponse,
-  StatePatch,
+  Summary,
   Usage,
 } from "./types";
 
@@ -54,6 +53,8 @@ interface RequestOptions {
   body?: unknown;
   /** Skip attaching/refreshing the bearer token (e.g. login/register). */
   auth?: boolean;
+  /** Extra headers (e.g. X-Retro-Source on board submissions). */
+  headers?: Record<string, string>;
   /** Internal: prevents infinite refresh loops. */
   _retried?: boolean;
 }
@@ -99,13 +100,10 @@ async function tryRefresh(): Promise<boolean> {
   return refreshInFlight;
 }
 
-export async function apiFetch<T>(
-  path: string,
-  opts: RequestOptions = {},
-): Promise<T> {
-  const { method = "GET", body, auth = true, _retried = false } = opts;
+async function rawFetch(path: string, opts: RequestOptions = {}): Promise<Response> {
+  const { method = "GET", body, auth = true, headers: extra = {}, _retried = false } = opts;
 
-  const headers: Record<string, string> = {};
+  const headers: Record<string, string> = { ...extra };
   if (body !== undefined) headers["Content-Type"] = "application/json";
   if (auth) {
     const token = getAccessToken();
@@ -120,14 +118,18 @@ export async function apiFetch<T>(
 
   if (res.status === 401 && auth && !_retried) {
     const ok = await tryRefresh();
-    if (ok) return apiFetch<T>(path, { ...opts, _retried: true });
+    if (ok) return rawFetch(path, { ...opts, _retried: true });
     clearTokens();
   }
 
   if (!res.ok) {
     throw new ApiRequestError(res.status, await parseError(res));
   }
+  return res;
+}
 
+export async function apiFetch<T>(path: string, opts: RequestOptions = {}): Promise<T> {
+  const res = await rawFetch(path, opts);
   if (res.status === 204) return undefined as T;
   const text = await res.text();
   return (text ? JSON.parse(text) : undefined) as T;
@@ -143,7 +145,9 @@ function qs(params: Record<string, string | number | boolean | undefined>): stri
   return parts.length ? `?${parts.join("&")}` : "";
 }
 
-const p = (id: string) => `/projects/${encodeURIComponent(id)}`;
+const enc = encodeURIComponent;
+const p = (id: string) => `/projects/${enc(id)}`;
+const b = (slug: string) => `/boards/${enc(slug)}`;
 
 export const api = {
   /* ─── Auth ───────────────────────────────────────────────────────────── */
@@ -155,131 +159,149 @@ export const api = {
     }),
 
   login: (email: string, password: string) =>
-    apiFetch<AuthResponse>("/auth/login", {
-      method: "POST",
-      auth: false,
-      body: { email, password },
-    }),
+    apiFetch<AuthResponse>("/auth/login", { method: "POST", auth: false, body: { email, password } }),
 
   logout: (refresh_token: string) =>
-    apiFetch<void>("/auth/logout", {
-      method: "POST",
-      body: { refresh_token },
-    }),
+    apiFetch<void>("/auth/logout", { method: "POST", body: { refresh_token } }),
 
   me: () => apiFetch<MeResponse>("/auth/me"),
 
   /* ─── Features (retro's own switches; public, used by anonymous pages) ──── */
-  features: () =>
-    apiFetch<{ features: Record<string, boolean> }>("/features", { auth: false }),
+  features: () => apiFetch<{ features: Record<string, boolean> }>("/features", { auth: false }),
 
   /* ─── Projects ───────────────────────────────────────────────────────── */
-  listProjects: (q = "") =>
-    apiFetch<{ items: Project[]; total: number }>(`/projects${qs({ q })}`),
+  listProjects: (q = "") => apiFetch<{ items: Project[]; total: number }>(`/projects${qs({ q })}`),
 
-  createProject: (input: { name: string; key?: string; description?: string }) =>
+  createProject: (input: { name: string; key?: string; description?: string; url?: string }) =>
     apiFetch<Project>("/projects", { method: "POST", body: input }),
 
   getProject: (id: string) => apiFetch<Project>(p(id)),
 
-  updateProject: (id: string, input: { name?: string; description?: string }) =>
+  updateProject: (id: string, input: ProjectPatch) =>
     apiFetch<Project>(p(id), { method: "PATCH", body: input }),
 
   deleteProject: (id: string) => apiFetch<void>(p(id), { method: "DELETE" }),
 
-  exportProject: (id: string) => apiFetch<ProjectExport>(`${p(id)}/export`),
+  rotateProjectKey: (id: string) =>
+    apiFetch<{ public_key: string; public_key_prefix: string }>(`${p(id)}/rotate-key`, { method: "POST" }),
 
-  /* ─── Environments ───────────────────────────────────────────────────── */
-  listEnvironments: (id: string) => apiFetch<Environment[]>(`${p(id)}/environments`),
+  projectSummary: (id: string) => apiFetch<Summary>(`${p(id)}/summary`),
 
-  createEnvironment: (id: string, input: { key: string; name?: string }) =>
-    apiFetch<Environment>(`${p(id)}/environments`, { method: "POST", body: input }),
+  projectTags: (id: string) => apiFetch<{ tags: { tag: string; count: number }[] }>(`${p(id)}/tags`),
 
-  updateEnvironment: (id: string, envId: string, input: { name?: string }) =>
-    apiFetch<Environment>(`${p(id)}/environments/${encodeURIComponent(envId)}`, {
-      method: "PATCH",
-      body: input,
-    }),
-
-  deleteEnvironment: (id: string, envId: string) =>
-    apiFetch<void>(`${p(id)}/environments/${encodeURIComponent(envId)}`, { method: "DELETE" }),
-
-  rotateEnvironmentKey: (id: string, envId: string) =>
-    apiFetch<{ client_key: string; client_key_prefix: string }>(
-      `${p(id)}/environments/${encodeURIComponent(envId)}/rotate-key`,
-      { method: "POST" },
-    ),
-
-  /* ─── Flags ──────────────────────────────────────────────────────────── */
-  listFlags: (
-    id: string,
-    opts: { q?: string; page?: number; per_page?: number; include_archived?: boolean } = {},
-  ) =>
-    apiFetch<Paginated<Flag>>(
-      `${p(id)}/flags${qs({
-        q: opts.q,
-        page: opts.page ?? 1,
-        per_page: opts.per_page ?? 50,
-        include_archived: opts.include_archived ? "true" : undefined,
+  /* ─── Feedback ───────────────────────────────────────────────────────── */
+  listFeedback: (id: string, query: FeedbackQuery = {}) =>
+    apiFetch<Paginated<FeedbackItem>>(
+      `${p(id)}/feedback${qs({
+        q: query.q,
+        type: query.type,
+        status: query.status,
+        sentiment: query.sentiment,
+        priority: query.priority,
+        tag: query.tag,
+        has_screenshot: query.has_screenshot ? "true" : undefined,
+        since: query.since,
+        page: query.page ?? 1,
+        per_page: query.per_page ?? 50,
+        sort: query.sort,
       })}`,
     ),
 
-  createFlag: (
-    id: string,
-    input: {
-      key: string;
-      name?: string;
-      description?: string;
-      kind?: FlagKind;
-      default_value?: FlagValue;
-      tags?: string[];
-      states?: Record<string, StatePatch>;
-    },
-  ) => apiFetch<Flag>(`${p(id)}/flags`, { method: "POST", body: input }),
+  /** `item` is the item UUID or its per-project number. */
+  getFeedback: (id: string, item: string | number) =>
+    apiFetch<FeedbackItem>(`${p(id)}/feedback/${enc(String(item))}`),
 
-  /** `flag` is the flag UUID or its key. */
-  getFlag: (id: string, flag: string) =>
-    apiFetch<Flag>(`${p(id)}/flags/${encodeURIComponent(flag)}`),
+  updateFeedback: (id: string, item: string, patch: FeedbackPatch) =>
+    apiFetch<FeedbackItem>(`${p(id)}/feedback/${enc(item)}`, { method: "PATCH", body: patch }),
 
-  updateFlag: (
-    id: string,
-    flag: string,
-    input: {
-      name?: string;
-      description?: string;
-      kind?: FlagKind;
-      default_value?: FlagValue;
-      tags?: string[];
-      archived?: boolean;
-    },
-  ) =>
-    apiFetch<Flag>(`${p(id)}/flags/${encodeURIComponent(flag)}`, {
-      method: "PATCH",
+  deleteFeedback: (id: string, item: string) =>
+    apiFetch<void>(`${p(id)}/feedback/${enc(item)}`, { method: "DELETE" }),
+
+  addNote: (id: string, item: string, body: string) =>
+    apiFetch<Note>(`${p(id)}/feedback/${enc(item)}/notes`, { method: "POST", body: { body } }),
+
+  deleteNote: (id: string, item: string, noteId: string) =>
+    apiFetch<void>(`${p(id)}/feedback/${enc(item)}/notes/${enc(noteId)}`, { method: "DELETE" }),
+
+  promoteFeedback: (id: string, item: string, input: { title?: string; description?: string; status?: RoadmapStatus } = {}) =>
+    apiFetch<{ item: FeedbackItem; roadmap_item: RoadmapItem }>(`${p(id)}/feedback/${enc(item)}/promote`, {
+      method: "POST",
       body: input,
     }),
 
-  setFlagState: (id: string, flag: string, envKey: string, patch: StatePatch) =>
-    apiFetch<Flag>(
-      `${p(id)}/flags/${encodeURIComponent(flag)}/states/${encodeURIComponent(envKey)}`,
-      { method: "PUT", body: patch },
-    ),
+  /**
+   * Screenshot bytes as an object URL. `<img>` cannot send the bearer token,
+   * so the dashboard fetches the image and renders the blob. Callers revoke
+   * the URL when done (URL.revokeObjectURL).
+   */
+  screenshotUrl: async (id: string, item: string): Promise<string> => {
+    const res = await rawFetch(`${p(id)}/feedback/${enc(item)}/screenshot`);
+    const blob = await res.blob();
+    return URL.createObjectURL(blob);
+  },
 
-  deleteFlag: (id: string, flag: string) =>
-    apiFetch<void>(`${p(id)}/flags/${encodeURIComponent(flag)}`, { method: "DELETE" }),
+  /* ─── Roadmap ────────────────────────────────────────────────────────── */
+  listRoadmap: (id: string, status?: RoadmapStatus) =>
+    apiFetch<{ items: RoadmapItem[] }>(`${p(id)}/roadmap${qs({ status, include_hidden: "true" })}`),
 
-  copyFlags: (
+  createRoadmapItem: (id: string, input: { title: string; description?: string; status?: RoadmapStatus; public?: boolean }) =>
+    apiFetch<RoadmapItem>(`${p(id)}/roadmap`, { method: "POST", body: input }),
+
+  updateRoadmapItem: (id: string, rid: string, input: { title?: string; description?: string | null; status?: RoadmapStatus; public?: boolean }) =>
+    apiFetch<RoadmapItem>(`${p(id)}/roadmap/${enc(rid)}`, { method: "PATCH", body: input }),
+
+  reorderRoadmap: (id: string, status: RoadmapStatus, ids: string[]) =>
+    apiFetch<{ items: RoadmapItem[] }>(`${p(id)}/roadmap/reorder`, { method: "PUT", body: { status, ids } }),
+
+  deleteRoadmapItem: (id: string, rid: string) =>
+    apiFetch<void>(`${p(id)}/roadmap/${enc(rid)}`, { method: "DELETE" }),
+
+  /* ─── Changelog ──────────────────────────────────────────────────────── */
+  listChangelog: (id: string) =>
+    apiFetch<{ items: ChangelogEntry[] }>(`${p(id)}/changelog${qs({ include_drafts: "true" })}`),
+
+  createChangelogEntry: (id: string, input: { title: string; body: string; version?: string; publish?: boolean }) =>
+    apiFetch<ChangelogEntry>(`${p(id)}/changelog`, { method: "POST", body: input }),
+
+  updateChangelogEntry: (
     id: string,
-    input: {
-      target_project_id: string;
-      flag_keys?: string[];
-      include_states?: boolean;
-      on_conflict?: OnConflict;
-    },
-  ) => apiFetch<CopyResult>(`${p(id)}/flags/copy`, { method: "POST", body: input }),
+    cid: string,
+    input: { title?: string; body?: string; version?: string | null; published?: boolean; roadmap_item_ids?: string[] },
+  ) => apiFetch<ChangelogEntry>(`${p(id)}/changelog/${enc(cid)}`, { method: "PATCH", body: input }),
 
-  /** Preview of what the evaluation API would answer (not metered). */
-  evaluatePreview: (id: string, environment: string, distinct_id = "") =>
-    apiFetch<Evaluation>(`${p(id)}/flags/evaluate${qs({ environment, distinct_id })}`),
+  deleteChangelogEntry: (id: string, cid: string) =>
+    apiFetch<void>(`${p(id)}/changelog/${enc(cid)}`, { method: "DELETE" }),
+
+  /* ─── Public boards (no auth) ────────────────────────────────────────── */
+  board: (slug: string) => apiFetch<Board>(b(slug), { auth: false }),
+
+  boardChangelog: (slug: string, page = 1, per_page = 20) =>
+    apiFetch<Paginated<PublicChangelogEntry>>(`${b(slug)}/changelog${qs({ page, per_page })}`, { auth: false }),
+
+  vote: (slug: string, rid: string, voter_id: string) =>
+    apiFetch<{ votes: number; voted: boolean }>(`${b(slug)}/items/${enc(rid)}/vote`, {
+      method: "POST",
+      auth: false,
+      body: { voter_id },
+    }),
+
+  unvote: (slug: string, rid: string, voter_id: string) =>
+    apiFetch<{ votes: number; voted: boolean }>(`${b(slug)}/items/${enc(rid)}/vote`, {
+      method: "DELETE",
+      auth: false,
+      body: { voter_id },
+    }),
+
+  boardSubmit: (
+    slug: string,
+    input: { type: FeedbackType; message: string; title?: string; email?: string; sentiment?: string; website: string },
+  ) =>
+    apiFetch<IngestResponse>(`${b(slug)}/feedback`, {
+      method: "POST",
+      auth: false,
+      body: { ...input, page_url: typeof location !== "undefined" ? location.href.split("#")[0] : undefined },
+      headers: { "X-Retro-Source": "board" },
+    }),
 
   /* ─── Account ────────────────────────────────────────────────────────── */
   usage: () => apiFetch<Usage>("/account/usage"),
@@ -293,13 +315,12 @@ export const api = {
   apiKeyRoles: () => apiFetch<RolesResponse>("/apikeys/roles", { auth: false }),
 
   createApiKey: (name: string, role: ApiKeyRole = "editor") =>
-    apiFetch<{ id: string; key: string; prefix: string; name: string; role: ApiKeyRole }>(
-      "/apikeys",
-      { method: "POST", body: { name, role } },
-    ),
+    apiFetch<{ id: string; key: string; prefix: string; name: string; role: ApiKeyRole }>("/apikeys", {
+      method: "POST",
+      body: { name, role },
+    }),
 
-  deleteApiKey: (id: string) =>
-    apiFetch<void>(`/apikeys/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  deleteApiKey: (id: string) => apiFetch<void>(`/apikeys/${enc(id)}`, { method: "DELETE" }),
 
   /* ─── Billing ────────────────────────────────────────────────────────── */
   billingOfferings: () => apiFetch<unknown>("/billing/offerings"),

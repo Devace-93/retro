@@ -3,7 +3,7 @@ import { tr, useI18n } from "../i18n";
 
 /**
  * Full-page "we're building" curtain, shown when the `site-building` feature
- * is ON (see routes/layout.tsx). The evaluation API and the MCP server keep
+ * is ON (see routes/layout.tsx). The ingest API, the widget and the MCP server keep
  * answering — only the web UI is curtained.
  */
 export const BuildingState = component$(() => {
@@ -33,11 +33,12 @@ export const BuildingState = component$(() => {
         {/* cable + hook */}
         <line x1="186" y1="53" x2="186" y2="96" stroke="#64748b" stroke-width="2" />
         <path d="M186 96c0 5-6 5-6 0" stroke="#64748b" stroke-width="2" fill="none" />
-        {/* hanging toggle block */}
+        {/* hanging feedback card */}
         <g>
-          <rect x="152" y="100" width="68" height="34" rx="8" fill="#7c3aed" />
-          <rect x="162" y="110" width="30" height="14" rx="7" fill="#ffffff" fill-opacity="0.35" />
-          <circle cx="185" cy="117" r="5" fill="#ffffff" />
+          <rect x="152" y="100" width="68" height="34" rx="8" fill="#059669" />
+          <circle cx="166" cy="117" r="3" fill="#ffffff" />
+          <circle cx="176" cy="117" r="3" fill="#ffffff" />
+          <circle cx="186" cy="117" r="3" fill="#ffffff" />
           <text x="207" y="122" text-anchor="middle" font-family="ui-sans-serif, system-ui" font-size="13" font-weight="700" fill="#ffffff">
             retro
           </text>
@@ -57,8 +58,8 @@ export const BuildingState = component$(() => {
           <path d="M109 159h10" stroke="#fff7ed" stroke-width="4" />
         </g>
         {/* sun/gear accent */}
-        <circle cx="242" cy="34" r="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="2.5" />
-        <circle cx="242" cy="34" r="4" fill="#7c3aed" />
+        <circle cx="242" cy="34" r="12" fill="#ecfdf5" stroke="#059669" stroke-width="2.5" />
+        <circle cx="242" cy="34" r="4" fill="#059669" />
       </svg>
 
       <h1 class="mt-6 text-3xl font-bold tracking-tight text-slate-900">

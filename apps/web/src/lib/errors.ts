@@ -1,7 +1,7 @@
 /**
  * Error → user-facing message. 402 `limit_reached` gets a specific line per
- * `error.which` (projects | environments | flags | api_keys); every other API
- * error shows the backend message; anything else (network) the fallback.
+ * `error.which` (projects | api_keys | roadmap_items); every other API error
+ * shows the backend message; anything else (network) the fallback.
  */
 import { ApiRequestError } from "./api";
 import { translate, type I18nState } from "../i18n";
@@ -9,9 +9,8 @@ import type { CatalogKey } from "../i18n/catalog/en";
 
 const LIMIT_KEYS: Record<string, CatalogKey> = {
   projects: "limit.projects",
-  environments: "limit.environments",
-  flags: "limit.flags",
   api_keys: "limit.api_keys",
+  roadmap_items: "limit.roadmap_items",
 };
 
 export function isLimitError(e: unknown): e is ApiRequestError {

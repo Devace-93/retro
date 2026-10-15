@@ -20,7 +20,7 @@ import { fetchServerFeatures } from "../lib/features.server";
  * re-provides account-targeted features from /auth/me), initializes PostHog
  * once, and enforces the `site-building` curtain: while that feature is ON,
  * every web route renders the building page instead of the app (the
- * evaluation API and the MCP server are separate and unaffected).
+ * ingest API, widget and MCP server are separate and unaffected).
  *
  * Resolving on the server means the SSR HTML already reflects the features,
  * so neither the real site nor a gated section flashes and the first paint is

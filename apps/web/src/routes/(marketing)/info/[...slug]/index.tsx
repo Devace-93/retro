@@ -10,6 +10,33 @@ const CONTRACT_URL = "https://github.com/Devace-93/retro/blob/main/CONTRACT.md";
 const MCP_SNIPPET = "claude mcp add retro --scope user --env RETRO_API_KEY=retro_live_… -- npx -y retro-feedback-mcp";
 const MCP_REMOTE_SNIPPET = `claude mcp add --transport http retro ${APP_URL}/mcp --header "Authorization: Bearer retro_live_…"`;
 
+const WIDGET_SCRIPT = `<script src="${APP_URL}/widget.js" data-project-key="retro_pub_…" defer></script>`;
+const WIDGET_ELEMENT = `<script src="${APP_URL}/widget.js" defer></script>
+<retro-widget project-key="retro_pub_…" position="bottom-right" lang="auto" theme="auto"></retro-widget>`;
+const WIDGET_JS = `// Headless: your own button, your own metadata
+retro.identify({ id: user.id, email: user.email });
+retro.setMeta({ plan: "pro", build: "1.4.0" });
+retro.on("submitted", ({ number }) => toast(\`Thanks! Ticket #\${number}\`));
+document.querySelector("#report-bug").onclick = () => retro.open({ type: "bug" });`;
+const CURL_INGEST = `curl -X POST ${APP_URL}/api/ingest/feedback \\
+  -H "X-Project-Key: retro_pub_…" -H "Content-Type: application/json" \\
+  -d '{
+    "type": "bug",
+    "message": "The export button does nothing on Safari 17",
+    "email": "ana@example.com",
+    "page_url": "https://myapp.example.com/editor",
+    "app_version": "1.4.0",
+    "metadata": { "browser": "Safari 17" }
+  }'`;
+const FORM_SNIPPET = `<form method="post" action="${APP_URL}/api/ingest/feedback">
+  <input type="hidden" name="project_key" value="retro_pub_…">
+  <input type="hidden" name="type" value="feedback">
+  <textarea name="message" required></textarea>
+  <input type="email" name="email" placeholder="Email (optional)">
+  <input type="text" name="website" style="display:none" tabindex="-1" autocomplete="off">
+  <button>Send</button>
+</form>`;
+
 interface Endpoint {
   method: string;
   path: string;
@@ -17,68 +44,64 @@ interface Endpoint {
   notes?: string;
 }
 
-/** Endpoint groups of the REST quick reference (mirror of CONTRACT.md). */
 const SECTIONS: { title: CatalogKey; body: CatalogKey; endpoints: Endpoint[]; snippet?: string }[] = [
   {
     title: "docs.projectsTitle",
     body: "docs.projectsBody",
     endpoints: [
       { method: "GET", path: "/projects?q=", scope: "projects:read" },
-      { method: "POST", path: "/projects", scope: "projects:write", notes: "{name, key?, description?} → 201 · 402 limit_reached" },
+      { method: "POST", path: "/projects", scope: "projects:write", notes: "{name, key?, description?, url?} → 201 · 402 limit_reached" },
       { method: "GET", path: "/projects/:id", scope: "projects:read" },
-      { method: "PATCH", path: "/projects/:id", scope: "projects:write", notes: "{name?, description?}" },
+      { method: "PATCH", path: "/projects/:id", scope: "projects:write", notes: "name, url, board_slug, board_enabled, types_enabled, …" },
       { method: "DELETE", path: "/projects/:id", scope: "projects:delete", notes: "cascades" },
-      { method: "GET", path: "/projects/:id/export", scope: "flags:read", notes: "retro.project.v1" },
-      { method: "GET", path: "/projects/:id/environments", scope: "projects:read" },
-      { method: "POST", path: "/projects/:id/environments", scope: "projects:write", notes: "{key, name?} → client_key once" },
-      { method: "DELETE", path: "/projects/:id/environments/:envId", scope: "projects:delete", notes: "last one: 400 last_environment" },
-      { method: "POST", path: "/projects/:id/environments/:envId/rotate-key", scope: "projects:write", notes: "old key stops immediately" },
+      { method: "POST", path: "/projects/:id/rotate-key", scope: "projects:write", notes: "old public key stops immediately" },
+      { method: "GET", path: "/projects/:id/summary", scope: "feedback:read", notes: "counts by status / type / sentiment" },
     ],
     snippet: `curl -X POST ${APP_URL}/api/projects \\
   -H "X-API-Key: retro_live_…" -H "Content-Type: application/json" \\
-  -d '{"name": "Web app"}'`,
+  -d '{"name": "My app", "url": "https://myapp.example.com"}'`,
   },
   {
-    title: "docs.flagsTitle",
-    body: "docs.flagsBody",
+    title: "docs.feedbackTitle",
+    body: "docs.feedbackBody",
     endpoints: [
-      { method: "GET", path: "/projects/:id/flags?q=&page=&per_page=&include_archived=", scope: "flags:read", notes: "ordered by key" },
-      { method: "POST", path: "/projects/:id/flags", scope: "flags:write", notes: "{key, name?, kind?, default_value?, tags?, states?} · 409 key_taken · 402" },
-      { method: "GET", path: "/projects/:id/flags/:flag", scope: "flags:read", notes: ":flag = UUID or key" },
-      { method: "PATCH", path: "/projects/:id/flags/:flag", scope: "flags:write", notes: "changing kind resets state values" },
-      { method: "DELETE", path: "/projects/:id/flags/:flag", scope: "flags:delete" },
+      { method: "GET", path: "/projects/:id/feedback?q=&type=&status=&sentiment=&priority=&tag=&page=&sort=", scope: "feedback:read", notes: "comma-separated lists for type/status" },
+      { method: "GET", path: "/projects/:id/feedback/:item", scope: "feedback:read", notes: ":item = UUID or #number" },
+      { method: "PATCH", path: "/projects/:id/feedback/:item", scope: "feedback:write", notes: "{status?, priority?, tags?, title?, type?, sentiment?, roadmap_item_id?}" },
+      { method: "POST", path: "/projects/:id/feedback/:item/notes", scope: "feedback:write", notes: "{body}" },
+      { method: "POST", path: "/projects/:id/feedback/:item/promote", scope: "feedback:write + board:write", notes: "→ roadmap item, idempotent" },
+      { method: "GET", path: "/projects/:id/feedback/:item/screenshot", scope: "feedback:read", notes: "image bytes" },
+      { method: "DELETE", path: "/projects/:id/feedback/:item", scope: "feedback:delete" },
     ],
-    snippet: `curl -X POST ${APP_URL}/api/projects/$PROJECT/flags \\
+    snippet: `curl -X PATCH ${APP_URL}/api/projects/$PROJECT/feedback/42 \\
   -H "X-API-Key: retro_live_…" -H "Content-Type: application/json" \\
-  -d '{"key": "new-checkout", "kind": "boolean", "tags": ["checkout"]}'`,
+  -d '{"status": "triaged", "priority": "high", "tags": ["export", "safari"]}'`,
   },
   {
-    title: "docs.statesTitle",
-    body: "docs.statesBody",
+    title: "docs.boardTitle",
+    body: "docs.boardBody",
     endpoints: [
-      { method: "PUT", path: "/projects/:id/flags/:flag/states/:envKey", scope: "flags:write", notes: "{enabled?, value?, rollout_percent?} → Flag" },
-      { method: "GET", path: "/projects/:id/flags/evaluate?environment=&distinct_id=", scope: "flags:read", notes: "preview, not metered" },
-    ],
-    snippet: `curl -X PUT ${APP_URL}/api/projects/$PROJECT/flags/new-checkout/states/staging \\
-  -H "X-API-Key: retro_live_…" -H "Content-Type: application/json" \\
-  -d '{"enabled": true, "rollout_percent": 25}'`,
-  },
-  {
-    title: "docs.copyTitle",
-    body: "docs.copyBody",
-    endpoints: [
-      { method: "POST", path: "/projects/:id/flags/copy", scope: "flags:write", notes: "{target_project_id, flag_keys?, include_states?, on_conflict?} → {copied, overwritten, skipped}" },
+      { method: "GET", path: "/projects/:id/roadmap?status=", scope: "board:read" },
+      { method: "POST", path: "/projects/:id/roadmap", scope: "board:write", notes: "{title, description?, status?, public?} · 402" },
+      { method: "PATCH", path: "/projects/:id/roadmap/:rid", scope: "board:write", notes: "done ⇒ completed_at; linked feedback follows" },
+      { method: "PUT", path: "/projects/:id/roadmap/reorder", scope: "board:write", notes: "{status, ids}" },
+      { method: "DELETE", path: "/projects/:id/roadmap/:rid", scope: "board:delete", notes: "unlinks feedback" },
+      { method: "GET", path: "/projects/:id/changelog?include_drafts=true", scope: "board:read" },
+      { method: "POST", path: "/projects/:id/changelog", scope: "board:write", notes: "{title, body (markdown), version?, publish?}" },
+      { method: "PATCH", path: "/projects/:id/changelog/:cid", scope: "board:write", notes: "published: true|false" },
+      { method: "DELETE", path: "/projects/:id/changelog/:cid", scope: "board:delete" },
     ],
   },
   {
-    title: "docs.evalTitle",
-    body: "docs.evalBody",
+    title: "docs.publicTitle",
+    body: "docs.publicBody",
     endpoints: [
-      { method: "GET", path: "/eval/flags?distinct_id=", scope: "X-Environment-Key", notes: "metered +1" },
-      { method: "GET", path: "/eval/flags/:key?distinct_id=", scope: "X-Environment-Key", notes: "metered +1 · 404 for unknown/archived" },
+      { method: "GET", path: "/boards/:slug", scope: "—", notes: "roadmap (public items) + latest changelog" },
+      { method: "GET", path: "/boards/:slug/changelog?page=", scope: "—" },
+      { method: "POST", path: "/boards/:slug/items/:rid/vote", scope: "—", notes: "{voter_id} · idempotent" },
+      { method: "DELETE", path: "/boards/:slug/items/:rid/vote", scope: "—", notes: "{voter_id}" },
+      { method: "POST", path: "/boards/:slug/feedback", scope: "—", notes: "same body as ingest, type defaults to feature" },
     ],
-    snippet: `curl "${APP_URL}/api/eval/flags?distinct_id=user-42" \\
-  -H "X-Environment-Key: retro_pub_…"`,
   },
 ];
 
@@ -120,10 +143,13 @@ const EndpointTable = component$<{ endpoints: Endpoint[] }>(({ endpoints }) => {
   );
 });
 
+const Code = component$<{ code: string }>(({ code }) => (
+  <pre class="mt-2 overflow-x-auto whitespace-pre-wrap break-all rounded-lg bg-slate-100 p-3 text-xs leading-relaxed"><code>{code}</code></pre>
+));
+
 /**
  * Catch-all info section: /info/pricing, /info/docs and a generic placeholder
- * for any other slug (terms, privacy, …) — future pages drop in here without
- * new routes.
+ * for any other slug (terms, privacy, …).
  */
 export default component$(() => {
   const loc = useLocation();
@@ -136,25 +162,15 @@ export default component$(() => {
     return (
       <div class="mx-auto max-w-6xl px-4 py-16">
         <div class="text-center">
-          <h1 class="text-4xl font-bold text-slate-900">
-            {early ? tr(i18n, "pricing.titlePlanned") : tr(i18n, "pricing.title")}
-          </h1>
-          <p class="mx-auto mt-3 max-w-2xl text-slate-600">
-            {early ? tr(i18n, "pricing.introPlanned") : tr(i18n, "pricing.intro")}
-          </p>
+          <h1 class="text-4xl font-bold text-slate-900">{early ? tr(i18n, "pricing.titlePlanned") : tr(i18n, "pricing.title")}</h1>
+          <p class="mx-auto mt-3 max-w-2xl text-slate-600">{early ? tr(i18n, "pricing.introPlanned") : tr(i18n, "pricing.intro")}</p>
         </div>
 
         {early && (
           <div class="mx-auto mt-8 max-w-3xl rounded-xl border border-primary-200 bg-primary-50 p-6 text-center" data-testid="early-access-pricing">
-            <p class="text-lg font-semibold text-primary-900">
-              {tr(i18n, "pricing.earlyTitle")}
-            </p>
-            <p class="mt-2 text-sm text-primary-900/80">
-              {tr(i18n, "pricing.earlyBody")}
-            </p>
-            <Link href="/blog/what-paid-plans-will-include" class="btn-primary mt-4">
-              {tr(i18n, "pricing.earlyCta")}
-            </Link>
+            <p class="text-lg font-semibold text-primary-900">{tr(i18n, "pricing.earlyTitle")}</p>
+            <p class="mt-2 text-sm text-primary-900/80">{tr(i18n, "pricing.earlyBody")}</p>
+            <Link href="/blog/what-paid-plans-will-include" class="btn-primary mt-4">{tr(i18n, "pricing.earlyCta")}</Link>
           </div>
         )}
 
@@ -163,18 +179,9 @@ export default component$(() => {
         </div>
 
         <div class="mt-10 card bg-primary-50 p-6 text-center">
-          <h2 class="text-lg font-semibold text-slate-900">
-            {tr(i18n, "pricing.enterpriseTitle")}
-          </h2>
-          <p class="mt-1 text-sm text-slate-600">
-            {tr(i18n, "pricing.enterpriseBody")}
-          </p>
-          <a
-            href="mailto:enrique@3m4.net?subject=retro%20Enterprise"
-            class="btn-primary mt-4"
-          >
-            {tr(i18n, "pricing.contactUs")}
-          </a>
+          <h2 class="text-lg font-semibold text-slate-900">{tr(i18n, "pricing.enterpriseTitle")}</h2>
+          <p class="mt-1 text-sm text-slate-600">{tr(i18n, "pricing.enterpriseBody")}</p>
+          <a href="mailto:enrique@3m4.net?subject=retro%20Enterprise" class="btn-primary mt-4">{tr(i18n, "pricing.contactUs")}</a>
         </div>
 
         <p class="mt-8 text-center text-sm text-slate-500">
@@ -194,6 +201,45 @@ export default component$(() => {
           {tr(i18n, "docs.fullContract")} →
         </a>
 
+        {/* Widget */}
+        <section class="mt-8 card p-6" id="widget">
+          <h2 class="text-xl font-semibold text-slate-900">{tr(i18n, "docs.widgetTitle")}</h2>
+          <p class="mt-2 text-sm text-slate-600">{tr(i18n, "docs.widgetBody")}</p>
+          <div class="mt-4 text-xs uppercase tracking-wide text-slate-500">{tr(i18n, "docs.widgetScript")}</div>
+          <Code code={WIDGET_SCRIPT} />
+          <div class="mt-4 text-xs uppercase tracking-wide text-slate-500">{tr(i18n, "docs.widgetElement")}</div>
+          <Code code={WIDGET_ELEMENT} />
+          <h3 class="mt-5 font-semibold text-slate-900">{tr(i18n, "docs.widgetAttrsTitle")}</h3>
+          <ul class="mt-2 list-disc space-y-1 pl-5 text-sm text-slate-700">
+            <li><code>project-key</code> — {tr(i18n, "docs.attrProjectKey")}</li>
+            <li><code>position</code> — <code>bottom-right</code> | <code>bottom-left</code></li>
+            <li><code>lang</code> — {tr(i18n, "docs.attrLang")}</li>
+            <li><code>theme</code> — {tr(i18n, "docs.attrTheme")}</li>
+            <li><code>accent</code> — {tr(i18n, "docs.attrAccent")}</li>
+            <li><code>hide-launcher</code> — {tr(i18n, "docs.attrHideLauncher")}</li>
+          </ul>
+          <h3 class="mt-5 font-semibold text-slate-900">{tr(i18n, "docs.widgetJsTitle")}</h3>
+          <p class="mt-1 text-sm text-slate-600">{tr(i18n, "docs.widgetJsBody")}</p>
+          <Code code={WIDGET_JS} />
+          <p class="mt-3 text-sm text-slate-600">{tr(i18n, "docs.widgetScreenshot")}</p>
+        </section>
+
+        {/* Ingest */}
+        <section class="mt-8 card p-6" id="ingest">
+          <h2 class="text-xl font-semibold text-slate-900">{tr(i18n, "docs.ingestTitle")}</h2>
+          <p class="mt-2 text-sm text-slate-600">{tr(i18n, "docs.ingestBody")}</p>
+          <Code code={CURL_INGEST} />
+          <ul class="mt-4 list-disc space-y-1 pl-5 text-sm text-slate-700">
+            <li>{tr(i18n, "docs.ingestField1")}</li>
+            <li>{tr(i18n, "docs.ingestField2")}</li>
+            <li>{tr(i18n, "docs.ingestField3")}</li>
+            <li>{tr(i18n, "docs.ingestField4")}</li>
+            <li>{tr(i18n, "docs.ingestField5")}</li>
+          </ul>
+          <div class="mt-4 text-xs uppercase tracking-wide text-slate-500">{tr(i18n, "docs.ingestForm")}</div>
+          <Code code={FORM_SNIPPET} />
+        </section>
+
         <div class="mt-8 card p-6">
           <h2 class="text-xl font-semibold text-slate-900">{tr(i18n, "docs.baseUrl")}</h2>
           <pre class="mt-3 overflow-x-auto rounded-lg bg-slate-100 p-3 text-sm"><code>{APP_URL}/api</code></pre>
@@ -205,7 +251,7 @@ export default component$(() => {
           <ul class="mt-3 list-disc space-y-2 pl-5 text-sm text-slate-700">
             <li>{tr(i18n, "docs.authDashboard")}</li>
             <li>{tr(i18n, "docs.authApiKey")}</li>
-            <li>{tr(i18n, "docs.authEnvKey")}</li>
+            <li>{tr(i18n, "docs.authPublicKey")}</li>
           </ul>
         </section>
 
@@ -213,52 +259,37 @@ export default component$(() => {
           <section key={s.title} class="mt-8 card p-6">
             <h2 class="text-xl font-semibold text-slate-900">{tr(i18n, s.title)}</h2>
             <p class="mt-2 text-sm text-slate-600">{tr(i18n, s.body)}</p>
-            {s.title === "docs.evalTitle" && (
-              <>
-                <ol class="mt-3 list-decimal space-y-2 pl-5 text-sm text-slate-700">
-                  <li>{tr(i18n, "docs.evalRule1")}</li>
-                  <li>{tr(i18n, "docs.evalRule2")}</li>
-                  <li>{tr(i18n, "docs.evalRule3")}</li>
-                  <li>{tr(i18n, "docs.evalRule4")}</li>
-                </ol>
-                <p class="mt-3 text-sm text-slate-600">{tr(i18n, "docs.evalPreview")}</p>
-              </>
-            )}
             <EndpointTable endpoints={s.endpoints} />
-            {s.snippet && (
-              <pre class="mt-4 overflow-x-auto whitespace-pre-wrap break-all rounded-lg bg-slate-100 p-3 text-xs leading-relaxed"><code>{s.snippet}</code></pre>
-            )}
+            {s.snippet && <Code code={s.snippet} />}
           </section>
         ))}
 
         <section class="mt-8 card p-6">
           <h2 class="text-xl font-semibold text-slate-900">{tr(i18n, "docs.errorsTitle")}</h2>
           <p class="mt-2 text-sm text-slate-600">{tr(i18n, "docs.errorsBody")}</p>
+          <p class="mt-2 text-sm text-slate-600">{tr(i18n, "docs.privacyBody")}</p>
         </section>
 
         <section class="mt-8 card p-6" id="mcp">
           <h2 class="text-xl font-semibold text-slate-900">{tr(i18n, "docs.mcpTitle")}</h2>
           <p class="mt-2 text-sm text-slate-600">{tr(i18n, "docs.mcpBody")}</p>
           <div class="mt-4 text-xs uppercase tracking-wide text-slate-500">{tr(i18n, "docs.mcpLocal")}</div>
-          <pre class="mt-2 overflow-x-auto whitespace-pre-wrap break-all rounded-lg bg-slate-100 p-3 text-xs leading-relaxed"><code>{MCP_SNIPPET}</code></pre>
+          <Code code={MCP_SNIPPET} />
           <div class="mt-4 text-xs uppercase tracking-wide text-slate-500">{tr(i18n, "docs.mcpRemote")}</div>
-          <pre class="mt-2 overflow-x-auto whitespace-pre-wrap break-all rounded-lg bg-slate-100 p-3 text-xs leading-relaxed"><code>{MCP_REMOTE_SNIPPET}</code></pre>
+          <Code code={MCP_REMOTE_SNIPPET} />
+          <p class="mt-3 text-sm text-slate-600">{tr(i18n, "docs.mcpTools")}</p>
         </section>
       </div>
     );
   }
 
   // Generic placeholder for any other /info/* page.
-  const title = slug
-    ? slug.split("/")[0].replace(/-/g, " ")
-    : tr(i18n, "info.title");
+  const title = slug ? slug.split("/")[0].replace(/-/g, " ") : tr(i18n, "info.title");
   return (
     <div class="mx-auto max-w-3xl px-4 py-20 text-center">
       <h1 class="text-3xl font-bold capitalize text-slate-900">{title}</h1>
       <p class="mt-3 text-slate-600">{tr(i18n, "info.comingSoon")}</p>
-      <Link href="/info" class="btn-secondary mt-6">
-        {tr(i18n, "info.backToInfo")}
-      </Link>
+      <Link href="/info" class="btn-secondary mt-6">{tr(i18n, "info.backToInfo")}</Link>
     </div>
   );
 });
@@ -266,7 +297,5 @@ export default component$(() => {
 export const head: DocumentHead = ({ params }) => {
   const slug = (params.slug || "info").split("/")[0];
   const title = slug === "pricing" ? "Pricing" : slug === "docs" ? "Docs" : slug.replace(/-/g, " ");
-  return {
-    title: `${title.charAt(0).toUpperCase() + title.slice(1)} — retro`,
-  };
+  return { title: `${title.charAt(0).toUpperCase() + title.slice(1)} — retro` };
 };

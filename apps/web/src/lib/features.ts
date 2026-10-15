@@ -1,6 +1,6 @@
 /**
  * retro's OWN feature switches ("features"), mirrored from the backend (the
- * source of truth). Not to be confused with the product's "flags".
+ * source of truth). Not to be confused with the feedback a project collects.
  *
  * Registry + fail-safe defaults live in `packages/shared/feature_flags.json`
  * (same pattern as plan_limits.json). Authenticated pages get resolved
@@ -15,8 +15,9 @@ export type FeatureKey =
   | "signups"
   | "early-access"
   | "public-api"
-  | "evaluation-api"
-  | "flag-copy"
+  | "ingest-api"
+  | "screenshots"
+  | "public-boards"
   | "billing";
 
 export type Features = Record<FeatureKey, boolean>;

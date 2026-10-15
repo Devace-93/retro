@@ -18,10 +18,10 @@ const REGISTRY_ROLES = roleRegistry.roles as Record<ApiKeyRole, RoleInfo>;
 const REGISTRY_DEFAULT = roleRegistry.default_role as ApiKeyRole;
 
 const AUDIT_ACTIONS = [
-  "project.create", "project.update", "project.delete",
-  "environment.create", "environment.update", "environment.delete", "environment.rotate_key",
-  "flag.create", "flag.update", "flag.delete", "flag.copy",
-  "flag_state.update",
+  "project.create", "project.update", "project.delete", "project.rotate_key",
+  "feedback.update", "feedback.delete", "feedback.promote", "feedback.note",
+  "roadmap.create", "roadmap.update", "roadmap.delete", "roadmap.reorder",
+  "changelog.create", "changelog.update", "changelog.delete", "changelog.publish",
   "apikey.create", "apikey.revoke",
   "auth.denied",
 ];

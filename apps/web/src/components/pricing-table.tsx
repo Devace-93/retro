@@ -32,24 +32,14 @@ export const PricingTable = component$<Props>(
           const price = annual ? plan.price_annual : plan.price_monthly;
           const featured = !early && key === highlight;
           return (
-            <div
-              key={key}
-              class={[
-                "card flex flex-col p-6",
-                featured ? "ring-2 ring-primary-600" : "",
-              ]}
-            >
+            <div key={key} class={["card flex flex-col p-6", featured ? "ring-2 ring-primary-600" : ""]}>
               {featured && (
-                <span class="badge mb-3 w-fit bg-primary-100 text-primary-700">
-                  {tr(i18n, "pricing.mostPopular")}
-                </span>
+                <span class="badge mb-3 w-fit bg-primary-100 text-primary-700">{tr(i18n, "pricing.mostPopular")}</span>
               )}
               <h3 class="text-lg font-semibold text-slate-900">{plan.label}</h3>
 
               <div class="mt-3 flex items-baseline gap-1">
-                <span class="text-3xl font-bold text-slate-900">
-                  {fmtPrice(price, i18n)}
-                </span>
+                <span class="text-3xl font-bold text-slate-900">{fmtPrice(price, i18n)}</span>
                 {!isEnterprise && (
                   <span class="text-sm text-slate-500">
                     {annual ? tr(i18n, "pricing.perYear") : tr(i18n, "pricing.perMonth")}
@@ -62,16 +52,14 @@ export const PricingTable = component$<Props>(
                   <strong>{fmtLimit(plan.projects, i18n)}</strong> {tr(i18n, "pricing.projects")}
                 </li>
                 <li>
-                  <strong>{fmtLimit(plan.environments_per_project, i18n)}</strong>{" "}
-                  {tr(i18n, "pricing.envsPerProject")}
+                  <strong>{fmtLimit(plan.feedback_per_month, i18n)}</strong> {tr(i18n, "pricing.feedbackPerMonth")}
                 </li>
                 <li>
-                  <strong>{fmtLimit(plan.flags_per_project, i18n)}</strong>{" "}
-                  {tr(i18n, "pricing.flagsPerProject")}
+                  <strong>{plan.attachment_storage_mb < 0 ? fmtLimit(-1, i18n) : fmtStorage(plan.attachment_storage_mb)}</strong>{" "}
+                  {tr(i18n, "pricing.screenshotStorage")}
                 </li>
                 <li>
-                  <strong>{fmtLimit(plan.evaluations_per_month, i18n)}</strong>{" "}
-                  {tr(i18n, "pricing.evalsPerMonth")}
+                  <strong>{fmtLimit(plan.roadmap_items_per_project, i18n)}</strong> {tr(i18n, "pricing.roadmapItems")}
                 </li>
                 <li>
                   <strong>{fmtLimit(plan.api_keys, i18n)}</strong> {tr(i18n, "pricing.apiKeys")}
@@ -88,21 +76,21 @@ export const PricingTable = component$<Props>(
               </ul>
 
               {(isEnterprise || !early) && (
-              <div class="mt-6">
-                {isEnterprise ? (
-                  <a href="mailto:enrique@3m4.net?subject=retro%20Enterprise" class="btn-secondary w-full">
-                    {tr(i18n, "pricing.contactUs")}
-                  </a>
-                ) : key === "free" ? (
-                  <Link href="/signup" class="btn-secondary w-full">
-                    {tr(i18n, "pricing.getStarted")}
-                  </Link>
-                ) : (
-                  <Link href="/signup" class="btn-primary w-full">
-                    {tr(i18n, "pricing.startPlan", { plan: plan.label.split(" ")[0] })}
-                  </Link>
-                )}
-              </div>
+                <div class="mt-6">
+                  {isEnterprise ? (
+                    <a href="mailto:enrique@3m4.net?subject=retro%20Enterprise" class="btn-secondary w-full">
+                      {tr(i18n, "pricing.contactUs")}
+                    </a>
+                  ) : key === "free" ? (
+                    <Link href="/signup" class="btn-secondary w-full">
+                      {tr(i18n, "pricing.getStarted")}
+                    </Link>
+                  ) : (
+                    <Link href="/signup" class="btn-primary w-full">
+                      {tr(i18n, "pricing.startPlan", { plan: plan.label.split(" ")[0] })}
+                    </Link>
+                  )}
+                </div>
               )}
             </div>
           );
@@ -111,3 +99,9 @@ export const PricingTable = component$<Props>(
     );
   },
 );
+
+/** 100 → "100 MB", 2048 → "2 GB". */
+export function fmtStorage(mb: number): string {
+  if (mb >= 1024) return `${(mb / 1024).toFixed(mb % 1024 === 0 ? 0 : 1)} GB`;
+  return `${mb} MB`;
+}

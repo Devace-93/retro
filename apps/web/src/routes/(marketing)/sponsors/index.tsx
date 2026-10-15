@@ -73,8 +73,7 @@ export default component$(() => {
         <div class="mt-4 inline-flex items-center gap-2 rounded-lg border border-primary-200 bg-primary-50 px-3 py-1.5 text-sm font-medium text-primary-700">
           <span class="grid h-5 w-5 place-items-center rounded bg-primary-600" aria-hidden="true">
             <svg width="12" height="12" viewBox="0 0 20 20" fill="none">
-              <rect x="1" y="5" width="18" height="10" rx="5" fill="#ffffff" fill-opacity="0.35" />
-              <circle cx="14" cy="10" r="3.5" fill="#ffffff" />
+              <path d="M4 3.5h12a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H9.5L6 17v-3.5H4a2 2 0 0 1-2-2v-6a2 2 0 0 1 2-2z" fill="#ffffff" fill-opacity="0.92" />
             </svg>
           </span>
           {tr(i18n, "sponsors.badgeLabel")}
@@ -102,7 +101,7 @@ export const head: DocumentHead = {
     {
       name: "description",
       content:
-        "Supporters of retro, the open-source feature-flag service. Pro/Supporter subscribers appear here with a badge.",
+        "Supporters of retro, the open-source user-feedback service. Pro/Supporter subscribers appear here with a badge.",
     },
   ],
 };

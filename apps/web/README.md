@@ -1,21 +1,25 @@
 # retro — Web (Qwik City)
 
-The marketing site **and** dashboard for [retro](https://retro.3m4.net), an
-open-source feature-flag service for projects, people and AI agents. One Qwik
-City app, SSR'd by a standalone Node-compatible HTTP server on **port 3000**
-(run with Bun). Same chrome, toolchain and code style as the sibling
-[3m4](https://github.com/Devace-93/3m4) app; brand colour is Tailwind violet.
+The marketing site, the dashboard **and** the public boards for
+[retro](https://retro.3m4.net), an open-source user-feedback service (widget,
+ingest API, inbox, roadmap, changelog, MCP server). One Qwik City app, SSR'd by
+a standalone Node-compatible HTTP server on **port 3000** (run with Bun). Same
+chrome, toolchain and code style as the sibling [3m4](https://github.com/Devace-93/3m4)
+and [exp](https://github.com/Devace-93/exp) apps; brand colour is Tailwind emerald.
 
 - Marketing: `/`, `/info` (+ `/info/pricing`, `/info/docs`), `/blog/*`, `/sponsors`.
 - Auth: `/login`, `/signup` (hidden while the `signups` feature is off).
-- Dashboard: `/dashboard` (projects), `/dashboard/projects/[id]` (flags table,
-  per-environment toggles, copy flags), `/dashboard/projects/[id]/flags/[flag]`
-  (flag editor + preview evaluation), `/dashboard/projects/[id]/settings`
-  (environments, client keys, export, delete), `/dashboard/settings` (API keys,
-  audit log), `/dashboard/billing` (hidden in early access).
+- Dashboard: `/dashboard` (projects), `/dashboard/projects/[id]` (inbox with
+  filters + detail drawer), `/dashboard/projects/[id]/roadmap`,
+  `/dashboard/projects/[id]/changelog`, `/dashboard/projects/[id]/settings`
+  (public key, install snippets, board + widget options, delete),
+  `/dashboard/settings` (API keys, audit log), `/dashboard/billing` (hidden in early access).
+- Public boards: `/b/[slug]` (roadmap tabs, votes, idea form) and
+  `/b/[slug]/changelog`, SSR'd from `GET /api/boards/:slug` over `API_INTERNAL_URL`.
+- `/widget.js` is built by `packages/widget` into `public/` (see the widget package).
 
-Vocabulary: **flags** are the product (what users create); **features** are
-retro's own switches from `packages/shared/feature_flags.json`.
+Vocabulary: **feedback items** are what users send; **features** are retro's own
+switches from `packages/shared/feature_flags.json`.
 
 Toolchain: **Bun** (do not use npm/pnpm). Stack: Qwik + Qwik City + Vite +
 TypeScript + Tailwind CSS, with the official `@builder.io/qwik-city/adapters/node-server`.
@@ -38,81 +42,20 @@ bun run serve        # starts the SSR server on 0.0.0.0:3000
 
 `bun run check:i18n` verifies that every base-language catalog has every
 English key (same placeholders, nothing extra) and that every locale in
-`src/i18n/langs.ts` has a base catalog.
+`src/i18n/langs.ts` has a base catalog. Catalogs live in `src/i18n/catalog/`:
+`en/{chrome,marketing,app}.ts` is the reference; one `<base>.ts` per language,
+optional `<base>-<COUNTRY>.ts` overrides.
 
-## Environment (build-time `VITE_*`)
+## Environment (build-time, `VITE_*`)
 
-| Var | Default | Purpose |
-|-----|---------|---------|
-| `VITE_API_URL` | `/api` | Backend base URL (Caddy proxies `/api`). |
-| `VITE_APP_URL` | `https://retro.3m4.net` | Public origin; used in docs/curl/MCP snippets. |
-| `VITE_POSTHOG_KEY` | – | PostHog project key. Unset → analytics no-ops. |
-| `VITE_POSTHOG_HOST` | `https://us.i.posthog.com` | PostHog host. |
-| `VITE_REVENUECAT_PUBLIC_KEY` | – | RevenueCat Web SDK key. |
-| `VITE_BILLING_ENABLED` | `true` | Set `false` for self-host → hides purchase UI. |
-| `VITE_INFO_URL` | `https://info.3m4.net` | Apps index linked from the footer. |
+| Variable | Default | Purpose |
+|---|---|---|
+| `VITE_API_URL` | `/api` | API base the browser calls |
+| `VITE_APP_URL` | `https://retro.3m4.net` | Public origin used in snippets and docs |
+| `VITE_POSTHOG_KEY` / `VITE_POSTHOG_HOST` | — | Analytics (no-op when unset) |
+| `VITE_REVENUECAT_PUBLIC_KEY` | — | Billing paywall |
+| `VITE_BILLING_ENABLED` | `true` | `false` hides every purchase surface (self-host) |
+| `VITE_INFO_URL` | `https://info.3m4.net` | Apps index linked from the footer |
 
-Runtime (SSR only): `API_INTERNAL_URL` (compose: `http://api:5000/api`) is
-where the server resolves `GET /api/features` for the first paint; when the
-API is unreachable the registry defaults are used, so SSR never fails.
-
-> `VITE_*` vars are inlined at **build time**. For hosted builds, pass them as
-> Docker build args (see `Dockerfile`).
-
-## Docker
-
-Build context is the **repo root** (the app imports `packages/shared/*.json`):
-
-```bash
-# from repo root
-docker build -f apps/web/Dockerfile -t retro-web .
-docker run -p 3000:3000 retro-web
-```
-
-Or via `deploy/docker-compose.yml` (the `web` service).
-
-## Layout
-
-```
-src/
-  root.tsx                 app root (<head>/<body>)
-  entry.ssr.tsx            SSR render entry
-  entry.node-server.tsx    standalone HTTP server (prod)
-  entry.dev.tsx            CSR dev entry
-  global.css               Tailwind + violet theme (CSS variables, light/dark)
-  lib/
-    api.ts                 typed client for every CONTRACT.md endpoint (bearer + 401 refresh)
-    auth.ts                token storage (retro_access_token / retro_refresh_token)
-    features.ts            retro's own switches: FeaturesContext, FEATURE_DEFAULTS
-    features.server.ts     SSR resolution of GET /api/features (with fallback)
-    errors.ts              error → message, 402 limit_reached per error.which
-    flag-values.ts         kind-aware value parsing/formatting, slug, JSON download
-    analytics.ts           PostHog wrapper (no-op when unset)
-    plans.ts               reads packages/shared/plan_limits.json
-    types.ts               API types (mirror of CONTRACT.md)
-  i18n/
-    index.ts               tr(i18n, key) runtime; langs.ts: 34 locales (3m4.lang)
-    catalog/en/*.ts        English source of truth (chrome, marketing, app)
-    catalog/<lang>.ts      base catalogs + <lang>-<COUNTRY>.ts overrides
-  components/              nav, footer, pricing table, switch, modal, …
-  content/posts.ts         blog posts (plain data)
-  routes/
-    (marketing)/           public pages
-    (auth)/                login / signup
-    (dashboard)/           authed area (client-side route guard)
-public/                    favicon.svg/.ico, PNG icons, og-image.png (rendered from
-                           an HTML template with Playwright), manifest, robots
-```
-
-## Notes
-
-- **Auth guard**: tokens live only in the browser, so `/dashboard/*` is guarded
-  client-side in `routes/(dashboard)/layout.tsx` (redirects to `/login`).
-- **i18n**: `tr(i18n, key)` is a module function on purpose — never return a
-  function from a `use*` hook in Qwik (breaks SSR with Code(3)).
-- **Limits**: a 402 `limit_reached` is rendered per `error.which`
-  (`projects | environments | flags | api_keys`) with an upgrade link when
-  billing is on and early access is off.
-- **Billing**: `dashboard/billing` launches RevenueCat Web checkout
-  (`app_user_id = account id`, entitlements `pro`/`team`).
-- Open source · MIT.
+Runtime (SSR only): `API_INTERNAL_URL` (compose: `http://api:5000/api`) is used
+by `routeLoader$`s to resolve features and public boards on the server.

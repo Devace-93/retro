@@ -77,8 +77,7 @@ export default component$(() => {
           ? tr(i18n, "auth.earlyAccessPitch")
           : tr(i18n, "auth.freePitch", {
               projects: fmtLimit(PLANS.free.projects, i18n),
-              flags: fmtLimit(PLANS.free.flags_per_project, i18n),
-              evals: fmtLimit(PLANS.free.evaluations_per_month, i18n),
+              feedback: fmtLimit(PLANS.free.feedback_per_month, i18n),
             })}
       </p>
 
