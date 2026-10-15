@@ -11,11 +11,15 @@ Tables are created by the `migrate` compose service:
 python -m dbcore.cli upgrade   # create_all (idempotent) + alembic upgrade head
 ```
 
-`migrations/versions/` starts empty: `create_all` bootstraps a fresh database
-and Alembic is only there to evolve the schema once it is live.
+`migrations/versions/0001_initial.py` holds the full initial schema (accounts,
+users, memberships, refresh tokens, subscriptions, projects, feedback items,
+notes, attachments, roadmap items, votes, changelog entries, usage counters,
+API keys, webhook events, audit events). It is written to be safe after
+`create_all`: every `create_table` is skipped when the table already exists.
 
 ## Future migrations (Alembic)
-Once the schema is live and you start changing it, switch to versioned migrations:
+Once the schema is live and you change `models.py`, generate a versioned
+migration against a running database:
 
 ```bash
 cd db

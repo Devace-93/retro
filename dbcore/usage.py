@@ -1,10 +1,16 @@
-"""Monthly usage metering.
+"""Monthly usage metering and the attachment storage cap.
 
-One metered metric per account per calendar month: ``evaluations``, the number
-of evaluation-API requests. It is a SOFT limit: the evaluation API keeps
-answering past the plan cap (never break a running app); the overage shows up
-in the dashboard and a single PostHog ``limit_reached {which: "evaluations"}``
-event fires per period (``evaluations_limit_notified`` makes it one-shot).
+One metered metric per account per calendar month: ``feedback``, the number
+of accepted submissions (ingest API + board). It is a SOFT limit: submissions
+keep being accepted past the plan cap (never lose a user's feedback); the
+overage shows up in the dashboard and a single PostHog
+``limit_reached {which: "feedback"}`` event fires per period
+(``feedback_limit_notified`` makes it one-shot).
+
+Attachment storage (``attachment_storage_mb``) is computed on demand as
+``SUM(attachments.size)`` for the account (indexed by ``account_id``) rather
+than kept as a counter: screenshots are rare compared to submissions and the
+SUM cannot drift when items are deleted.
 
 Period = calendar month [first day, first day of next month).
 """
@@ -12,11 +18,11 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from .models import UsageCounter
+from .models import Attachment, UsageCounter
 from .plans import is_unlimited
 
 
@@ -48,7 +54,7 @@ def get_or_create_counter(session: Session, account_id, on: date | None = None) 
             with session.begin_nested():
                 counter = UsageCounter(
                     account_id=account_id, period_start=start, period_end=end,
-                    evaluations=0, evaluations_limit_notified=False,
+                    feedback=0, feedback_limit_notified=False,
                 )
                 session.add(counter)
                 session.flush()
@@ -57,26 +63,41 @@ def get_or_create_counter(session: Session, account_id, on: date | None = None) 
     return counter
 
 
-def meter_evaluation(session: Session, account_id, limit: int) -> bool:
-    """Count one evaluation request. Returns True exactly once per period, the
+def meter_feedback(session: Session, account_id, limit: int) -> bool:
+    """Count one accepted submission. Returns True exactly once per period, the
     first time the counter reaches ``limit`` — the caller fires the PostHog
     event. Never blocks: the soft limit is reported, not enforced."""
     counter = get_or_create_counter(session, account_id)
-    # Atomic SQL increment: evaluation traffic is concurrent by nature and a
+    # Atomic SQL increment: ingest traffic is concurrent by nature and a
     # read-modify-write in Python would lose counts across workers.
     total = session.scalar(
         update(UsageCounter)
         .where(UsageCounter.id == counter.id)
-        .values(evaluations=UsageCounter.evaluations + 1)
-        .returning(UsageCounter.evaluations)
+        .values(feedback=UsageCounter.feedback + 1)
+        .returning(UsageCounter.feedback)
     )
     if is_unlimited(limit) or total < limit:
         return False
     # Only the request that flips the flag gets to notify (one-shot).
     flipped = session.scalar(
         update(UsageCounter)
-        .where(UsageCounter.id == counter.id, UsageCounter.evaluations_limit_notified.is_(False))
-        .values(evaluations_limit_notified=True)
+        .where(UsageCounter.id == counter.id, UsageCounter.feedback_limit_notified.is_(False))
+        .values(feedback_limit_notified=True)
         .returning(UsageCounter.id)
     )
     return flipped is not None
+
+
+def attachment_bytes(session: Session, account_id) -> int:
+    """Total screenshot bytes stored for the account."""
+    return int(
+        session.scalar(select(func.coalesce(func.sum(Attachment.size), 0)).where(Attachment.account_id == account_id))
+        or 0
+    )
+
+
+def storage_available(session: Session, account_id, limit_mb: int, incoming: int) -> bool:
+    """True if ``incoming`` more bytes fit under the plan's storage cap."""
+    if is_unlimited(limit_mb):
+        return True
+    return attachment_bytes(session, account_id) + incoming <= limit_mb * 1024 * 1024

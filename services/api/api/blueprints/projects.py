@@ -1,4 +1,4 @@
-"""Projects blueprint: CRUD + export.
+"""Projects blueprint: CRUD, public-key rotation, summary and tags.
 
 These endpoints accept EITHER a dashboard JWT OR a management API key.
 Everything is scoped to ``g.account_id`` so one account can never see
@@ -6,15 +6,16 @@ another's projects (a foreign project is a 404, never a 403), and each
 endpoint declares the RBAC scope it needs. Mutations are written to the audit
 log in the same transaction as the change.
 
-Creating a project seeds three environments (production / staging /
-development) and returns their one-time client keys; the helpers that do that
-(``get_owned_project``, ``create_environment``) are shared with the
-environments and flags blueprints.
+Creating a project mints its public key (``retro_pub_…``, what the widget and
+curl post with) and picks a globally unique ``board_slug``; the board itself
+starts disabled. The helpers (``get_owned_project``, ``project_counts``,
+``limit_reached``) are shared with the feedback, roadmap and changelog
+blueprints.
 """
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from flask import Blueprint, g, jsonify, request
 from sqlalchemy import func, or_, select
@@ -22,24 +23,31 @@ from sqlalchemy import func, or_, select
 from dbcore import audit
 from dbcore.config import config
 from dbcore.db import session_scope
-from dbcore.evaluate import default_state
-from dbcore.models import Account, Environment, Flag, FlagState, Project
+from dbcore.feedback import SENTIMENTS, STATUSES, TYPES, is_hex_color
+from dbcore.models import Account, FeedbackItem, Project, RoadmapItem
 from dbcore.plans import effective_plan_limits, within_limit
 from dbcore.posthog_client import capture
-from dbcore.slugs import is_valid_project_key, slugify
+from dbcore.slugs import (
+    is_reserved_board_slug,
+    is_valid_board_slug,
+    is_valid_project_key,
+    slugify,
+    suffixed,
+)
 
-from ..auth_utils import ENV_KEY_PREFIX, actor, generate_secret_key, hash_token, require_auth_or_api_key, require_scope
+from ..auth_utils import PUBLIC_KEY_PREFIX, actor, generate_secret_key, hash_token, require_auth_or_api_key, require_scope
 from ..errors import ApiError
 from ..extensions import limiter, public_api_key_func
-from ..serializers import iso, json_body, serialize_project
+from ..serializers import json_body, serialize_project
 
 bp = Blueprint("projects", __name__)
 
 # Public-API budget applies on top of the global default limit.
 public_limit = limiter.limit(config.rate_limit_public_api, key_func=public_api_key_func)
 
-# Seeded on project creation, in this order (position 0, 1, 2).
-DEFAULT_ENVIRONMENTS = (("production", "Production"), ("staging", "Staging"), ("development", "Development"))
+# Fields PATCH accepts, by type, so validation stays table-driven.
+_STRING_FIELDS = {"name": 120, "description": 20000, "url": 2048, "board_title": 120, "board_intro": 20000}
+_BOOL_FIELDS = ("board_enabled", "allow_votes", "allow_board_submissions", "allow_screenshots", "allow_email")
 
 
 # --------------------------------------------------------------------------- #
@@ -59,35 +67,28 @@ def get_owned_project(session, project_id_str: str) -> Project:
     return project
 
 
-def flag_counts(session, project_ids: list) -> dict:
-    """``{project_id: flag_count}`` in one query (archived flags included)."""
+def project_counts(session, project_ids: list) -> dict:
+    """``{project_id: {feedback, new, roadmap}}`` in two grouped queries."""
     if not project_ids:
         return {}
+    out = {pid: {"feedback": 0, "new": 0, "roadmap": 0} for pid in project_ids}
     rows = session.execute(
-        select(Flag.project_id, func.count(Flag.id))
-        .where(Flag.project_id.in_(project_ids))
-        .group_by(Flag.project_id)
+        select(FeedbackItem.project_id, FeedbackItem.status, func.count(FeedbackItem.id))
+        .where(FeedbackItem.project_id.in_(project_ids))
+        .group_by(FeedbackItem.project_id, FeedbackItem.status)
     ).all()
-    return {pid: n for pid, n in rows}
-
-
-def create_environment(session, project: Project, key: str, name: str, position: int) -> tuple[Environment, str]:
-    """Add an environment with a fresh client key and a default state for
-    every existing flag of the project. Returns ``(env, plaintext_key)``."""
-    full_key, prefix = generate_secret_key(ENV_KEY_PREFIX)
-    env = Environment(
-        project_id=project.id,
-        key=key,
-        name=name,
-        client_key_hash=hash_token(full_key),
-        client_key_prefix=prefix,
-        position=position,
-    )
-    session.add(env)
-    session.flush()
-    for flag_id in session.scalars(select(Flag.id).where(Flag.project_id == project.id)):
-        session.add(FlagState(flag_id=flag_id, environment_id=env.id, **default_state()))
-    return env, full_key
+    for pid, status, n in rows:
+        out[pid]["feedback"] += n
+        if status == "new":
+            out[pid]["new"] += n
+    rows = session.execute(
+        select(RoadmapItem.project_id, func.count(RoadmapItem.id))
+        .where(RoadmapItem.project_id.in_(project_ids))
+        .group_by(RoadmapItem.project_id)
+    ).all()
+    for pid, n in rows:
+        out[pid]["roadmap"] = n
+    return out
 
 
 def limit_reached(account: Account, which: str, message: str) -> ApiError:
@@ -99,6 +100,30 @@ def limit_reached(account: Account, which: str, message: str) -> ApiError:
         groups={"account": str(account.id)},
     )
     return ApiError(402, "limit_reached", message, extra={"which": which})
+
+
+def _mint_public_key(project: Project) -> None:
+    full_key, prefix = generate_secret_key(PUBLIC_KEY_PREFIX)
+    project.public_key = full_key
+    project.public_key_hash = hash_token(full_key)
+    project.public_key_prefix = prefix
+
+
+def _free_board_slug(session, wanted: str) -> str:
+    """``wanted`` when globally free and not reserved, otherwise ``wanted-xxxx``."""
+    candidate = wanted
+    if is_reserved_board_slug(candidate) or not is_valid_board_slug(candidate):
+        candidate = suffixed(wanted if len(wanted) > 1 else f"{wanted}0")
+    for _ in range(10):
+        taken = session.scalar(select(Project.id).where(Project.board_slug == candidate))
+        if not taken:
+            return candidate
+        candidate = suffixed(wanted)
+    raise ApiError(500, "slug_exhausted", "Could not allocate a board slug; try again.")
+
+
+def _serialize_one(session, project: Project) -> dict:
+    return serialize_project(project, project_counts(session, [project.id]).get(project.id))
 
 
 # --------------------------------------------------------------------------- #
@@ -116,13 +141,8 @@ def list_projects():
             like = f"%{q}%"
             stmt = stmt.where(or_(Project.name.ilike(like), Project.key.ilike(like)))
         projects = session.scalars(stmt.order_by(Project.created_at.desc(), Project.id)).all()
-        ids = [p.id for p in projects]
-        counts = flag_counts(session, ids)
-        envs: dict = {pid: [] for pid in ids}
-        if ids:
-            for env in session.scalars(select(Environment).where(Environment.project_id.in_(ids))):
-                envs[env.project_id].append(env)
-        items = [serialize_project(p, envs[p.id], counts.get(p.id, 0)) for p in projects]
+        counts = project_counts(session, [p.id for p in projects])
+        items = [serialize_project(p, counts.get(p.id)) for p in projects]
     return jsonify({"items": items, "total": len(items)})
 
 
@@ -139,6 +159,7 @@ def create_project():
     if not is_valid_project_key(key):
         raise ApiError(400, "invalid_key", "key must match ^[a-z0-9][a-z0-9-]{0,62}$.")
     description = (data.get("description") or "").strip() or None
+    url = (data.get("url") or "").strip()[:2048] or None
 
     with session_scope() as session:
         account = session.get(Account, g.account_id)
@@ -153,15 +174,18 @@ def create_project():
         if taken:
             raise ApiError(409, "key_taken", f"A project with key '{key}' already exists.")
 
-        project = Project(account_id=account.id, key=key, name=name, description=description)
+        project = Project(
+            account_id=account.id,
+            key=key,
+            name=name,
+            description=description,
+            url=url,
+            board_slug=_free_board_slug(session, key),
+            types_enabled=list(TYPES),
+        )
+        _mint_public_key(project)
         session.add(project)
         session.flush()
-
-        environments, client_keys = [], {}
-        for position, (env_key, env_name) in enumerate(DEFAULT_ENVIRONMENTS):
-            env, plaintext = create_environment(session, project, env_key, env_name, position)
-            environments.append(env)
-            client_keys[env.id] = plaintext
 
         audit.record(
             session,
@@ -169,18 +193,18 @@ def create_project():
             action="project.create",
             target_type="project",
             target_id=str(project.id),
-            meta={"key": key, "name": name, "environments": [e.key for e in environments]},
+            meta={"key": key, "name": name, "board_slug": project.board_slug},
             **actor(),
         )
         session.flush()
-        body = serialize_project(project, environments, 0, client_keys)
+        body = serialize_project(project)
 
     capture(str(g.account_id), "project_created", {"plan": account.plan}, groups={"account": str(g.account_id)})
     return jsonify(body), 201
 
 
 # --------------------------------------------------------------------------- #
-# Get / patch / delete
+# Get / patch / delete / rotate
 # --------------------------------------------------------------------------- #
 @bp.get("/<project_id>")
 @public_limit
@@ -188,8 +212,7 @@ def create_project():
 @require_scope("projects:read")
 def get_project(project_id):
     with session_scope() as session:
-        project = get_owned_project(session, project_id)
-        body = serialize_project(project, project.environments, flag_counts(session, [project.id]).get(project.id, 0))
+        body = _serialize_one(session, get_owned_project(session, project_id))
     return jsonify(body)
 
 
@@ -199,27 +222,62 @@ def get_project(project_id):
 @require_scope("projects:write")
 def patch_project(project_id):
     data = json_body()
+    changed: list[str] = []
     with session_scope() as session:
         project = get_owned_project(session, project_id)
-        if "name" in data:
-            name = (data.get("name") or "").strip()
-            if not name:
-                raise ApiError(400, "missing_name", "name cannot be empty.")
-            project.name = name
-        if "description" in data:
-            project.description = (data.get("description") or "").strip() or None
+
+        for field, max_len in _STRING_FIELDS.items():
+            if field in data:
+                value = (data.get(field) or "").strip()[:max_len] or None
+                if field == "name" and not value:
+                    raise ApiError(400, "missing_name", "name cannot be empty.")
+                setattr(project, field, value)
+                changed.append(field)
+
+        for field in _BOOL_FIELDS:
+            if field in data:
+                setattr(project, field, bool(data.get(field)))
+                changed.append(field)
+
+        if "board_slug" in data:
+            slug = (data.get("board_slug") or "").strip().lower()
+            if not is_valid_board_slug(slug):
+                raise ApiError(400, "invalid_slug", "board_slug must match ^[a-z0-9][a-z0-9-]{1,62}$.")
+            if is_reserved_board_slug(slug):
+                raise ApiError(400, "reserved_slug", f"'{slug}' is reserved.")
+            if slug != project.board_slug:
+                taken = session.scalar(select(Project.id).where(Project.board_slug == slug))
+                if taken:
+                    raise ApiError(409, "slug_taken", f"The board slug '{slug}' is already in use.")
+                project.board_slug = slug
+                changed.append("board_slug")
+
+        if "types_enabled" in data:
+            raw = data.get("types_enabled")
+            if not isinstance(raw, list) or not raw or any(t not in TYPES for t in raw):
+                raise ApiError(400, "invalid_types", f"types_enabled must be a non-empty subset of {list(TYPES)}.")
+            project.types_enabled = [t for t in TYPES if t in raw]
+            changed.append("types_enabled")
+
+        if "widget_accent" in data:
+            accent = (data.get("widget_accent") or "").strip() or None
+            if accent is not None and not is_hex_color(accent):
+                raise ApiError(400, "invalid_accent", "widget_accent must be a #rrggbb colour.")
+            project.widget_accent = accent.lower() if accent else None
+            changed.append("widget_accent")
+
         audit.record(
             session,
             account_id=g.account_id,
             action="project.update",
             target_type="project",
             target_id=str(project.id),
-            meta={"key": project.key, "fields": sorted(k for k in data if k in ("name", "description"))},
+            meta={"key": project.key, "fields": sorted(set(changed))},
             **actor(),
         )
         session.flush()
         session.refresh(project)
-        body = serialize_project(project, project.environments, flag_counts(session, [project.id]).get(project.id, 0))
+        body = _serialize_one(session, project)
     return jsonify(body)
 
 
@@ -239,58 +297,99 @@ def delete_project(project_id):
             meta={"key": project.key, "name": project.name},
             **actor(),
         )
-        # ON DELETE CASCADE takes environments, flags and states with it.
+        # ON DELETE CASCADE takes feedback, notes, attachments, roadmap,
+        # votes and changelog entries with it.
         session.delete(project)
     return "", 204
 
 
-# --------------------------------------------------------------------------- #
-# Export
-# --------------------------------------------------------------------------- #
-@bp.get("/<project_id>/export")
+@bp.post("/<project_id>/rotate-key")
 @public_limit
 @require_auth_or_api_key
-@require_scope("flags:read")
-def export_project(project_id):
-    """Portable snapshot of a project (format ``retro.project.v1``). Client keys
-    are never exported; secrets stay in the database."""
+@require_scope("projects:write")
+def rotate_key(project_id):
+    """Replace the public key. The old key stops working immediately: every
+    widget snippet out there must be updated."""
     with session_scope() as session:
         project = get_owned_project(session, project_id)
-        environments = sorted(project.environments, key=lambda e: (e.position, e.key))
-        env_key_by_id = {e.id: e.key for e in environments}
-        flags = session.scalars(
-            select(Flag).where(Flag.project_id == project.id).order_by(Flag.key)
-        ).all()
-        states_by_flag: dict = {}
-        if flags:
-            for st in session.scalars(select(FlagState).where(FlagState.flag_id.in_([f.id for f in flags]))):
-                states_by_flag.setdefault(st.flag_id, {})[st.environment_id] = st
-        out_flags = []
-        for flag in flags:
-            states = {}
-            for env in environments:
-                st = states_by_flag.get(flag.id, {}).get(env.id)
-                states[env.key] = (
-                    {"enabled": st.enabled, "value": st.value, "rollout_percent": st.rollout_percent}
-                    if st is not None else default_state()
-                )
-            out_flags.append(
-                {
-                    "key": flag.key,
-                    "name": flag.name,
-                    "description": flag.description,
-                    "kind": flag.kind,
-                    "default_value": flag.default_value,
-                    "tags": list(flag.tags or []),
-                    "archived": flag.archived,
-                    "states": states,
-                }
-            )
-        body = {
-            "format": "retro.project.v1",
-            "exported_at": iso(datetime.now(timezone.utc)),
-            "project": {"key": project.key, "name": project.name, "description": project.description},
-            "environments": [{"key": e.key, "name": e.name, "position": e.position} for e in environments],
-            "flags": out_flags,
+        old_prefix = project.public_key_prefix
+        _mint_public_key(project)
+        audit.record(
+            session,
+            account_id=g.account_id,
+            action="project.rotate_key",
+            target_type="project",
+            target_id=str(project.id),
+            meta={"key": project.key, "old_prefix": old_prefix, "new_prefix": project.public_key_prefix},
+            **actor(),
+        )
+        session.flush()
+        body = {"public_key": project.public_key, "public_key_prefix": project.public_key_prefix}
+    return jsonify(body)
+
+
+# --------------------------------------------------------------------------- #
+# Summary + tags
+# --------------------------------------------------------------------------- #
+@bp.get("/<project_id>/summary")
+@public_limit
+@require_auth_or_api_key
+@require_scope("feedback:read")
+def summary(project_id):
+    """Counts for the inbox header and the MCP ``feedback_summary`` tool."""
+    now = datetime.now(timezone.utc)
+    with session_scope() as session:
+        project = get_owned_project(session, project_id)
+        base = select(func.count(FeedbackItem.id)).where(FeedbackItem.project_id == project.id)
+
+        def grouped(column):
+            rows = session.execute(
+                select(column, func.count(FeedbackItem.id))
+                .where(FeedbackItem.project_id == project.id)
+                .group_by(column)
+            ).all()
+            return {k: n for k, n in rows if k is not None}
+
+        by_status = grouped(FeedbackItem.status)
+        by_type = grouped(FeedbackItem.type)
+        by_sentiment = grouped(FeedbackItem.sentiment)
+        total = sum(by_status.values())
+        last_7 = session.scalar(base.where(FeedbackItem.created_at >= now - timedelta(days=7))) or 0
+        last_30 = session.scalar(base.where(FeedbackItem.created_at >= now - timedelta(days=30))) or 0
+        top_tags = _tag_counts(session, project.id)[:10]
+    return jsonify(
+        {
+            "project_id": str(project.id),
+            "total": total,
+            "by_status": {s: by_status.get(s, 0) for s in STATUSES},
+            "by_type": {t: by_type.get(t, 0) for t in TYPES},
+            "by_sentiment": {s: by_sentiment.get(s, 0) for s in SENTIMENTS},
+            "last_7_days": last_7,
+            "last_30_days": last_30,
+            "top_tags": top_tags,
         }
+    )
+
+
+def _tag_counts(session, project_id) -> list[dict]:
+    """``[{tag, count}]`` sorted by count desc, unnesting the JSONB tag arrays."""
+    tag = func.jsonb_array_elements_text(FeedbackItem.tags).column_valued("tag")
+    rows = session.execute(
+        select(tag, func.count())
+        .select_from(FeedbackItem)
+        .where(FeedbackItem.project_id == project_id)
+        .group_by(tag)
+        .order_by(func.count().desc(), tag)
+    ).all()
+    return [{"tag": t, "count": n} for t, n in rows]
+
+
+@bp.get("/<project_id>/tags")
+@public_limit
+@require_auth_or_api_key
+@require_scope("feedback:read")
+def tags(project_id):
+    with session_scope() as session:
+        project = get_owned_project(session, project_id)
+        body = {"tags": _tag_counts(session, project.id)}
     return jsonify(body)

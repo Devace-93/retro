@@ -56,9 +56,9 @@ def offerings():
                 "price_annual": plan.get("price_annual"),
                 "limits": {
                     "projects": plan.get("projects"),
-                    "environments_per_project": plan.get("environments_per_project"),
-                    "flags_per_project": plan.get("flags_per_project"),
-                    "evaluations_per_month": plan.get("evaluations_per_month"),
+                    "feedback_per_month": plan.get("feedback_per_month"),
+                    "attachment_storage_mb": plan.get("attachment_storage_mb"),
+                    "roadmap_items_per_project": plan.get("roadmap_items_per_project"),
                     "api_keys": plan.get("api_keys"),
                     "audit_retention_days": plan.get("audit_retention_days"),
                     "max_users": plan.get("max_users"),

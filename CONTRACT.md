@@ -104,8 +104,13 @@ an API key add `RATE_LIMIT_PUBLIC_API` per key; ingest routes add
 per ip_hash.
 
 CORS: management routes allow the dashboard origin only. **Ingest, board and
-widget-config routes allow any origin** (`*`, no credentials) because they are
-called from third-party apps.
+widget-config routes allow any origin** (no credentials; the API echoes the
+caller's `Origin`) because they are called from third-party apps. Preflight
+allows the `Content-Type`, `X-Project-Key` and `X-Retro-Source` headers.
+
+Request bodies are capped at 3 MB (413); that is a 1.5 MB screenshot as base64
+plus the rest of the submission. `MAX_SCREENSHOT_BYTES` (default 1500000)
+tunes the decoded-image cap.
 
 ### Auth
 
@@ -145,7 +150,7 @@ a project of another account is a 404, never a 403.
 - `PATCH  /projects/:id/feedback/:item` `{status?, priority?, tags?, title?, type?, sentiment?, roadmap_item_id?}` → FeedbackItem — `feedback:write`. Audit `feedback.update` with `meta.fields` and, when status changed, `meta.from`/`meta.to`. `roadmap_item_id: null` unlinks.
 - `DELETE /projects/:id/feedback/:item` → 204 — `feedback:delete`
 - `POST   /projects/:id/feedback/:item/notes` `{body}` → Note (201) — `feedback:write`. Audit `feedback.note`.
-- `DELETE /projects/:id/feedback/:item/notes/:noteId` → 204 — `feedback:write` (own notes) 
+- `DELETE /projects/:id/feedback/:item/notes/:noteId` → 204 — `feedback:write`. API keys may delete only their own notes (403 `forbidden`); dashboard sessions (account owners) may delete any.
 - `POST   /projects/:id/feedback/:item/promote` `{title?, description?, status?}` → `{item: FeedbackItem, roadmap_item: RoadmapItem}` (201) — `feedback:write` + `board:write`.
   Creates a roadmap item (default `status: planned`, `title` = item title,
   `description` = item message), links the item (`roadmap_item_id`) and sets
@@ -206,7 +211,7 @@ Feature `public-boards` OFF or `board_enabled` false → 404 `not_found`.
 
 - `GET  /boards/:slug` → Board: project public info, roadmap items (public only, grouped by status), published changelog entries (latest 10), `can_submit`, `can_vote`.
 - `GET  /boards/:slug/changelog?page=&per_page=20` → `{items:[PublicChangelogEntry], page, per_page, total}`
-- `POST /boards/:slug/items/:rid/vote` `{voter_id}` → `{votes, voted: true}`. `voter_id` is a UUID the browser generates once and keeps in localStorage (`retro.voter`). One vote per (roadmap item, voter_id) and per (roadmap item, ip_hash) per day: a repeat is idempotent (200, `voted: true`). 403 `votes_disabled` when `allow_votes` is false.
+- `POST /boards/:slug/items/:rid/vote` `{voter_id}` → `{votes, voted: true}`. `voter_id` is a UUID the browser generates once and keeps in localStorage (`retro.voter`); the API accepts any 8–64 URL-safe characters (400 `invalid_voter_id`). One vote per (roadmap item, voter_id) and per (roadmap item, ip_hash) per day: a repeat is idempotent (200, `voted: true`). 403 `votes_disabled` when `allow_votes` is false.
 - `DELETE /boards/:slug/items/:rid/vote` `{voter_id}` → `{votes, voted: false}`
 - `POST /boards/:slug/feedback` → same body/response as `POST /ingest/feedback` minus `project_key`; `type` defaults to `feature`. 403 `submissions_disabled` when `allow_board_submissions` is false. Source `board`.
 
@@ -288,7 +293,7 @@ Feature `public-boards` OFF or `board_enabled` false → 404 `not_found`.
   "number": 123,
   "type": "bug",
   "sentiment": null,
-  "title": "Export button does nothing",
+  "title": "Export button does nothing",   // ≤ 140 chars; derived from the first line of message when omitted
   "message": "Full text…",
   "status": "new",
   "priority": "none",
@@ -305,6 +310,7 @@ Feature `public-boards` OFF or `board_enabled` false → 404 `not_found`.
   "screenshot": { "content_type": "image/jpeg", "size": 183221, "width": 1600, "height": 900 },
   "roadmap_item_id": null,
   "notes": [ { "id", "body", "author": { "id", "email" }, "created_at" } ],
+  // author is { "id": null, "email": null, "label": "retro_live_AbCd" } for notes added with an API key
   "created_at": "…",
   "updated_at": "…"
 }

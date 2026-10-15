@@ -11,7 +11,7 @@ from dbcore.config import config
 from dbcore.db import session_scope
 from dbcore.models import Account, AuditEvent
 from dbcore.plans import effective_plan_limits
-from dbcore.usage import get_or_create_counter
+from dbcore.usage import attachment_bytes, get_or_create_counter
 
 from ..auth_utils import require_auth_or_api_key, require_scope
 from ..errors import ApiError
@@ -35,7 +35,7 @@ def usage():
             raise ApiError(404, "not_found", "Account not found.")
         limits = effective_plan_limits(account.plan, str(account.id))
         counter = get_or_create_counter(session, account.id)
-        body = serialize_usage(counter, limits, account_counts(session, account.id))
+        body = serialize_usage(counter, limits, account_counts(session, account.id), attachment_bytes(session, account.id))
     return jsonify(body)
 
 

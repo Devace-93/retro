@@ -2,7 +2,7 @@
 
 Source of truth: ``packages/shared/api_key_roles.json``. A *role* is a named
 bundle of *scopes*; endpoints declare the scope they need with
-``@require_scope("flags:write")`` and never reason about roles directly. That
+``@require_scope("feedback:write")`` and never reason about roles directly. That
 keeps the policy data-driven: adding a role is a JSON edit, not a code change.
 
 Dashboard users (JWT) are account owners and get every scope. API keys get the

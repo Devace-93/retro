@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 
 from flask import request
 
-from dbcore.evaluate import default_state
+from dbcore.config import config
 
 from .errors import ApiError
 
@@ -36,6 +36,27 @@ def json_body() -> dict:
     return data
 
 
+def json_or_form_body() -> dict:
+    """JSON object when the request is JSON, otherwise the form fields (ingest
+    accepts ``application/x-www-form-urlencoded`` so a plain ``<form>`` works)."""
+    if request.is_json:
+        return json_body()
+    if request.form:
+        return {k: v for k, v in request.form.items()}
+    # Some clients post JSON without the content type; try anyway.
+    data = request.get_json(silent=True, force=True)
+    if isinstance(data, dict):
+        return data
+    return {}
+
+
+def board_url(project) -> str | None:
+    """Public board URL, or None while the board is disabled."""
+    if not project.board_enabled:
+        return None
+    return f"{config.app_base_url.rstrip('/')}/b/{project.board_slug}"
+
+
 def serialize_user(user) -> dict:
     return {
         "id": str(user.id),
@@ -54,77 +75,173 @@ def serialize_account(account) -> dict:
     }
 
 
-def serialize_environment(env, client_key: str | None = None) -> dict:
-    """Exactly the CONTRACT.md "Environment" shape. ``client_key`` (the
-    plaintext) is only present on create / rotate."""
-    body = {
-        "id": str(env.id),
-        "key": env.key,
-        "name": env.name,
-        "client_key_prefix": env.client_key_prefix,
-        "position": env.position,
-        "created_at": iso(env.created_at),
-    }
-    if client_key is not None:
-        body["client_key"] = client_key
-    return body
-
-
-def serialize_project(project, environments: list, flag_count: int, client_keys: dict | None = None) -> dict:
-    """Exactly the CONTRACT.md "Project" shape. ``client_keys`` maps
-    environment id -> plaintext key, only on create."""
-    client_keys = client_keys or {}
+def serialize_project(project, counts: dict | None = None) -> dict:
+    """Exactly the CONTRACT.md "Project" shape (owner-only: includes the public key)."""
+    counts = counts or {}
     return {
         "id": str(project.id),
         "key": project.key,
         "name": project.name,
         "description": project.description,
-        "flag_count": flag_count,
-        "environments": [
-            serialize_environment(env, client_keys.get(env.id))
-            for env in sorted(environments, key=lambda e: (e.position, e.key))
-        ],
+        "url": project.url,
+        "public_key": project.public_key,
+        "public_key_prefix": project.public_key_prefix,
+        "board_slug": project.board_slug,
+        "board_enabled": project.board_enabled,
+        "board_url": board_url(project),
+        "board_title": project.board_title,
+        "board_intro": project.board_intro,
+        "allow_votes": project.allow_votes,
+        "allow_board_submissions": project.allow_board_submissions,
+        "types_enabled": list(project.types_enabled or []),
+        "allow_screenshots": project.allow_screenshots,
+        "allow_email": project.allow_email,
+        "widget_accent": project.widget_accent,
+        "counts": {
+            "feedback": counts.get("feedback", 0),
+            "new": counts.get("new", 0),
+            "roadmap": counts.get("roadmap", 0),
+        },
         "created_at": iso(project.created_at),
         "updated_at": iso(project.updated_at),
     }
 
 
-def serialize_state(state) -> dict:
+def serialize_note(note) -> dict:
+    author = None
+    if note.author is not None:
+        author = {"id": str(note.author.id), "email": note.author.email}
+    elif note.author_label:
+        author = {"id": None, "email": None, "label": note.author_label}
+    return {"id": str(note.id), "body": note.body, "author": author, "created_at": iso(note.created_at)}
+
+
+def serialize_feedback(item, *, with_notes: bool = False) -> dict:
+    """Exactly the CONTRACT.md "FeedbackItem" shape. ``notes`` only on detail."""
+    attachment = item.attachment
+    body = {
+        "id": str(item.id),
+        "project_id": str(item.project_id),
+        "number": item.number,
+        "type": item.type,
+        "sentiment": item.sentiment,
+        "title": item.title,
+        "message": item.message,
+        "status": item.status,
+        "priority": item.priority,
+        "tags": list(item.tags or []),
+        "reporter_email": item.reporter_email,
+        "reporter_id": item.reporter_id,
+        "page_url": item.page_url,
+        "app_version": item.app_version,
+        "locale": item.locale,
+        "user_agent": item.user_agent,
+        "metadata": item.metadata_ or {},
+        "source": item.source,
+        "has_screenshot": attachment is not None,
+        "screenshot": (
+            {
+                "content_type": attachment.content_type,
+                "size": attachment.size,
+                "width": attachment.width,
+                "height": attachment.height,
+            }
+            if attachment is not None
+            else None
+        ),
+        "roadmap_item_id": str(item.roadmap_item_id) if item.roadmap_item_id else None,
+        "created_at": iso(item.created_at),
+        "updated_at": iso(item.updated_at),
+    }
+    if with_notes:
+        body["notes"] = [serialize_note(n) for n in item.notes]
+    return body
+
+
+def serialize_roadmap_item(item, feedback_count: int = 0) -> dict:
     return {
-        "enabled": state.enabled,
-        "value": state.value,
-        "rollout_percent": state.rollout_percent,
-        "updated_at": iso(state.updated_at),
+        "id": str(item.id),
+        "project_id": str(item.project_id),
+        "title": item.title,
+        "description": item.description,
+        "status": item.status,
+        "position": item.position,
+        "public": item.public,
+        "votes": item.votes,
+        "feedback_count": feedback_count,
+        "completed_at": iso(item.completed_at),
+        "created_at": iso(item.created_at),
+        "updated_at": iso(item.updated_at),
     }
 
 
-def serialize_flag(flag, environments: list, states: dict) -> dict:
-    """Exactly the CONTRACT.md "Flag" shape.
-
-    ``states`` maps environment id -> FlagState. Every environment of the
-    project appears under its key; a missing row (should not happen, every
-    environment/flag creation seeds one) falls back to the default state.
-    """
-    out_states = {}
-    for env in sorted(environments, key=lambda e: (e.position, e.key)):
-        state = states.get(env.id)
-        if state is None:
-            out_states[env.key] = {**default_state(), "updated_at": None}
-        else:
-            out_states[env.key] = serialize_state(state)
+def serialize_public_roadmap_item(item) -> dict:
     return {
-        "id": str(flag.id),
-        "project_id": str(flag.project_id),
-        "key": flag.key,
-        "name": flag.name,
-        "description": flag.description,
-        "kind": flag.kind,
-        "default_value": flag.default_value,
-        "tags": list(flag.tags or []),
-        "archived": flag.archived,
-        "states": out_states,
-        "created_at": iso(flag.created_at),
-        "updated_at": iso(flag.updated_at),
+        "id": str(item.id),
+        "title": item.title,
+        "description": item.description,
+        "status": item.status,
+        "votes": item.votes,
+        "completed_at": iso(item.completed_at),
+    }
+
+
+def serialize_changelog_entry(entry) -> dict:
+    return {
+        "id": str(entry.id),
+        "project_id": str(entry.project_id),
+        "title": entry.title,
+        "body": entry.body,
+        "version": entry.version,
+        "published_at": iso(entry.published_at),
+        "roadmap_item_ids": list(entry.roadmap_item_ids or []),
+        "created_at": iso(entry.created_at),
+        "updated_at": iso(entry.updated_at),
+    }
+
+
+def serialize_public_changelog_entry(entry) -> dict:
+    return {
+        "id": str(entry.id),
+        "title": entry.title,
+        "body": entry.body,
+        "version": entry.version,
+        "published_at": iso(entry.published_at),
+    }
+
+
+def serialize_widget_config(project, features: dict) -> dict:
+    """Exactly the CONTRACT.md "WidgetConfig" shape (what the widget boots with)."""
+    screenshots = bool(features.get("screenshots", True))
+    boards = bool(features.get("public-boards", True))
+    return {
+        "project": {"name": project.name, "url": project.url},
+        "types_enabled": list(project.types_enabled or []),
+        "allow_screenshots": project.allow_screenshots and screenshots,
+        "allow_email": project.allow_email,
+        "accent": project.widget_accent,
+        "board_url": board_url(project) if boards else None,
+        "features": {"screenshots": screenshots, "public_boards": boards},
+    }
+
+
+def serialize_board(project, roadmap: dict, changelog: list) -> dict:
+    """Exactly the CONTRACT.md "Board" shape (public, no secrets)."""
+    return {
+        "project": {
+            "name": project.name,
+            "url": project.url,
+            "board_title": project.board_title or project.name,
+            "board_intro": project.board_intro,
+        },
+        "roadmap": {
+            status: [serialize_public_roadmap_item(i) for i in roadmap.get(status, [])]
+            for status in ("planned", "in_progress", "done")
+        },
+        "changelog": [serialize_public_changelog_entry(e) for e in changelog],
+        "can_submit": project.allow_board_submissions,
+        "can_vote": project.allow_votes,
+        "types_enabled": list(project.types_enabled or []),
     }
 
 
@@ -140,11 +257,12 @@ def serialize_api_key(api_key) -> dict:
     }
 
 
-def serialize_usage(counter, limits: dict, counts: dict) -> dict:
+def serialize_usage(counter, limits: dict, counts: dict, attachment_bytes: int = 0) -> dict:
     return {
         "period_start": counter.period_start.isoformat(),
         "period_end": counter.period_end.isoformat(),
-        "evaluations": counter.evaluations,
+        "feedback": counter.feedback,
+        "attachment_bytes": attachment_bytes,
         "counts": counts,
         "limits": limits,
     }

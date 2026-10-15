@@ -1,43 +1,39 @@
-"""Key validation and slugification for projects, environments and flags.
+"""Key / slug validation and slugification for projects and boards.
 
-Keys are what SDKs and humans type (``new-checkout``, ``production``), so the
-rules are strict and stable; they come straight from CONTRACT.md:
+Rules come straight from CONTRACT.md:
 
-* project / environment keys: ``^[a-z0-9][a-z0-9-]{0,62}$``
-* flag keys:                  ``^[a-z0-9][a-z0-9_-]{0,98}$``
+* project keys:  ``^[a-z0-9][a-z0-9-]{0,62}$`` (unique per account)
+* board slugs:   ``^[a-z0-9][a-z0-9-]{1,62}$`` (globally unique, not reserved)
 
-(The contract does not spell out an environment key pattern; environments
-share the project rule, which is the stricter of the two.)
+Board slugs are the path segment of ``/b/<slug>``; the reserved list keeps
+them from colliding with the app's own top-level routes.
 """
 from __future__ import annotations
 
 import re
+import secrets
 import unicodedata
 
 PROJECT_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
-ENVIRONMENT_KEY_RE = PROJECT_KEY_RE
-FLAG_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,98}$")
+BOARD_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}$")
 
-# Flag keys that would shadow the static sub-routes of /projects/:id/flags/*
-# (POST .../flags/copy, GET .../flags/evaluate). Creating one is 400 reserved_key.
-RESERVED_FLAG_KEYS = frozenset({"copy", "evaluate"})
+# Top-level routes of the web app (and the API/MCP mounts) a board must not shadow.
+RESERVED_BOARD_SLUGS = frozenset(
+    {"api", "b", "widget", "dashboard", "login", "signup", "logout", "info", "blog",
+     "sponsors", "mcp", "settings", "billing", "assets", "build", "healthz"}
+)
 
 
 def is_valid_project_key(key: str) -> bool:
     return bool(PROJECT_KEY_RE.match(key or ""))
 
 
-def is_valid_environment_key(key: str) -> bool:
-    return bool(ENVIRONMENT_KEY_RE.match(key or ""))
+def is_valid_board_slug(slug: str) -> bool:
+    return bool(BOARD_SLUG_RE.match(slug or ""))
 
 
-def is_valid_flag_key(key: str) -> bool:
-    """Pattern check only; see :func:`is_reserved_flag_key` for the route clash."""
-    return bool(FLAG_KEY_RE.match(key or ""))
-
-
-def is_reserved_flag_key(key: str) -> bool:
-    return key in RESERVED_FLAG_KEYS
+def is_reserved_board_slug(slug: str) -> bool:
+    return slug in RESERVED_BOARD_SLUGS
 
 
 def slugify(name: str, max_len: int = 63) -> str:
@@ -46,3 +42,10 @@ def slugify(name: str, max_len: int = 63) -> str:
     text = unicodedata.normalize("NFKD", name or "").encode("ascii", "ignore").decode()
     text = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
     return text[:max_len].rstrip("-")
+
+
+def suffixed(slug: str, max_len: int = 63) -> str:
+    """``slug`` + ``-xxxx`` (4 random lowercase alphanumerics), kept within ``max_len``."""
+    alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+    tail = "".join(secrets.choice(alphabet) for _ in range(4))
+    return f"{slug[: max_len - 5].rstrip('-')}-{tail}"

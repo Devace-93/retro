@@ -16,7 +16,7 @@ from dbcore.feature_flags import resolve_all
 from dbcore.models import Account, ApiKey, Membership, Project, RefreshToken, User
 from dbcore.plans import effective_plan_limits
 from dbcore.posthog_client import capture, group_identify
-from dbcore.usage import get_or_create_counter
+from dbcore.usage import attachment_bytes, get_or_create_counter
 
 from ..auth_utils import (
     create_access_token,
@@ -180,7 +180,7 @@ def me():
             "account": serialize_account(account),
             "plan": account.plan,
             "limits": limits,
-            "usage": serialize_usage(counter, limits, counts),
+            "usage": serialize_usage(counter, limits, counts, attachment_bytes(session, account.id)),
             "counts": {"projects": counts["projects"]},
             "features": resolve_all(str(account.id)),
         }

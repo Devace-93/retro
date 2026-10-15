@@ -46,7 +46,15 @@ class Config:
     # rate limiting
     rate_limit_default: str = os.getenv("RATE_LIMIT_DEFAULT", "120/minute")
     rate_limit_public_api: str = os.getenv("RATE_LIMIT_PUBLIC_API", "60/minute")
-    rate_limit_eval: str = os.getenv("RATE_LIMIT_EVAL", "600/minute")
+    # Ingest: per (project, ip_hash). Board: per ip_hash. Both are end-user traffic.
+    rate_limit_ingest: str = os.getenv("RATE_LIMIT_INGEST", "30/minute")
+    rate_limit_board: str = os.getenv("RATE_LIMIT_BOARD", "60/minute")
+
+    # privacy: raw IPs are never stored; see dbcore/privacy.py
+    ip_hash_secret: str = os.getenv("IP_HASH_SECRET", "dev-insecure-ip-salt")
+
+    # attachments (screenshots)
+    max_screenshot_bytes: int = int(os.getenv("MAX_SCREENSHOT_BYTES", str(1_500_000)))
 
 
 config = Config()

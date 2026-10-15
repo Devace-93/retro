@@ -1,7 +1,7 @@
 """Append-only audit trail for account-level actions.
 
 Every mutating API call (and every authorization denial) writes one row to
-``audit_events``: who (user or API key), what (``flag.create`` ...), on which
+``audit_events``: who (user or API key), what (``feedback.update`` ...), on which
 target, and the outcome. Rows are never updated or deleted by application code.
 
 Two entry points:

@@ -4,7 +4,7 @@
 
     gunicorn -b 0.0.0.0:5000 -w 2 'api.app:create_app()'
 
-Responsibilities here: CORS, rate limiting, blueprint registration (billing is
+Responsibilities here: CORS, request size cap, rate limiting, blueprint registration (billing is
 conditional on ``BILLING_ENABLED``), health checks, and a small set of error
 handlers that always emit the ``{"error": {...}}`` envelope.
 """
@@ -21,17 +21,30 @@ from .extensions import limiter
 
 def create_app() -> Flask:
     app = Flask(__name__)
+    # Screenshots travel base64-encoded inside JSON; 1.5 MB of image is ~2 MB
+    # of text plus the rest of the body. Anything bigger is a 413.
+    app.config["MAX_CONTENT_LENGTH"] = 3 * 1024 * 1024
 
-    # ---- CORS: allow the dashboard (and apex) origins -----------------------
+    # ---- CORS --------------------------------------------------------------
+    # Management routes: dashboard (and apex) origins only. Ingest, board and
+    # widget-config routes are called from third-party apps, so they allow any
+    # origin (no credentials). flask-cors matches the FIRST resource whose
+    # pattern fits, so the public ones come first.
     # flask-cors is optional at import time so `py_compile`/tests don't hard-fail
     # if it isn't installed; in the real image it always is.
     try:
         from flask_cors import CORS
 
+        public_origins = {"origins": "*", "supports_credentials": False,
+                          "allow_headers": ["Content-Type", "X-Project-Key", "X-Retro-Source", "Authorization"]}
         CORS(
             app,
-            resources={r"/api/*": {"origins": [config.dashboard_url, config.app_base_url]}},
-            supports_credentials=True,
+            resources={
+                r"/api/ingest/*": public_origins,
+                r"/api/boards/*": public_origins,
+                r"/api/features": public_origins,
+                r"/api/*": {"origins": [config.dashboard_url, config.app_base_url], "supports_credentials": True},
+            },
         )
     except ImportError:  # pragma: no cover
         pass
@@ -43,17 +56,21 @@ def create_app() -> Flask:
     from .blueprints.account import bp as account_bp
     from .blueprints.apikeys import bp as apikeys_bp
     from .blueprints.auth import bp as auth_bp
-    from .blueprints.environments import bp as environments_bp
-    from .blueprints.eval import bp as eval_bp
-    from .blueprints.flags import bp as flags_bp
+    from .blueprints.boards import bp as boards_bp
+    from .blueprints.changelog import bp as changelog_bp
+    from .blueprints.feedback import bp as feedback_bp
+    from .blueprints.ingest import bp as ingest_bp
     from .blueprints.projects import bp as projects_bp
+    from .blueprints.roadmap import bp as roadmap_bp
     from .features import bp as features_bp
 
     app.register_blueprint(auth_bp, url_prefix="/api/auth")
     app.register_blueprint(projects_bp, url_prefix="/api/projects")
-    app.register_blueprint(environments_bp, url_prefix="/api/projects/<project_id>/environments")
-    app.register_blueprint(flags_bp, url_prefix="/api/projects/<project_id>/flags")
-    app.register_blueprint(eval_bp, url_prefix="/api/eval")
+    app.register_blueprint(feedback_bp, url_prefix="/api/projects/<project_id>/feedback")
+    app.register_blueprint(roadmap_bp, url_prefix="/api/projects/<project_id>/roadmap")
+    app.register_blueprint(changelog_bp, url_prefix="/api/projects/<project_id>/changelog")
+    app.register_blueprint(ingest_bp, url_prefix="/api/ingest")
+    app.register_blueprint(boards_bp, url_prefix="/api/boards")
     app.register_blueprint(account_bp, url_prefix="/api/account")
     app.register_blueprint(apikeys_bp, url_prefix="/api/apikeys")
     app.register_blueprint(features_bp, url_prefix="/api/features")

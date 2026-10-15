@@ -33,14 +33,26 @@ def public_api_key_func() -> str:
     return request.headers.get("X-API-Key") or _bearer("retro_live_") or get_remote_address()
 
 
-def eval_key_func() -> str:
-    """Rate-limit key for evaluation routes: the environment client key
-    (header or bearer), falling back to the client IP."""
-    return request.headers.get("X-Environment-Key") or _bearer("retro_pub_") or get_remote_address()
+def ingest_key_func() -> str:
+    """Rate-limit key for ingest routes: (project public key, client IP).
+
+    Bucketing per project AND per address means one noisy end user cannot
+    exhaust a project's budget for everyone else, while an attacker rotating
+    projects still hits the per-IP default limit.
+    """
+    from .auth_utils import presented_project_key
+
+    return f"{presented_project_key() or '-'}|{get_remote_address()}"
+
+
+def board_key_func() -> str:
+    """Rate-limit key for public board routes: the client IP."""
+    return get_remote_address()
 
 
 # Default limit applies to every route. Management routes additionally apply
-# `config.rate_limit_public_api` and evaluation routes `config.rate_limit_eval`
+# `config.rate_limit_public_api`, ingest routes `config.rate_limit_ingest` and
+# board routes `config.rate_limit_board`
 # via explicit `@limiter.limit(...)` decorators.
 limiter = Limiter(
     key_func=get_remote_address,

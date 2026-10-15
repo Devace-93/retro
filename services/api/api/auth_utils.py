@@ -8,17 +8,18 @@ Three ways to authenticate against this API:
 2. **Management API** — a long-lived API key (``retro_live_…``) in the
    ``X-API-Key`` header (or as a bearer token), looked up by its sha256 hash
    in ``api_keys``.
-3. **Evaluation API** — an environment client key (``retro_pub_…``) in the
-   ``X-Environment-Key`` header (or as a bearer token). It identifies exactly
-   one (project, environment), has no role and cannot call anything else.
+3. **Ingest API** — a project public key (``retro_pub_…``) in the
+   ``X-Project-Key`` header, as a bearer token, or as the ``project_key``
+   field of the body / query string (so a plain HTML form can post). It
+   identifies exactly one project, has no role and cannot call anything else.
 
-The ``@require_auth`` / ``@require_api_key`` / ``@require_environment_key``
+The ``@require_auth`` / ``@require_api_key`` / ``@require_project_key``
 decorators put the resolved ids on ``flask.g`` so views can stay terse.
 
 Authorization (RBAC) is a second, separate step: every management request
 carries ``g.scopes`` (dashboard users: all scopes; API keys: the scopes of the
 key's role, see ``dbcore.rbac``) and views declare what they need with
-``@require_scope("flags:write")``. Denials are written to the audit log.
+``@require_scope("feedback:write")``. Denials are written to the audit log.
 """
 from __future__ import annotations
 
@@ -37,13 +38,13 @@ from sqlalchemy import select
 from dbcore import audit
 from dbcore.config import config
 from dbcore.db import SessionLocal
-from dbcore.models import ApiKey, Environment, Project
+from dbcore.models import ApiKey, Project
 from dbcore.rbac import all_scopes, scopes_for
 
 from .errors import ApiError
 
 API_KEY_PREFIX = "retro_live_"
-ENV_KEY_PREFIX = "retro_pub_"
+PUBLIC_KEY_PREFIX = "retro_pub_"
 
 # argon2-cffi password hasher with library defaults (a good modern baseline).
 _ph = PasswordHasher()
@@ -76,7 +77,7 @@ def create_access_token(user_id, account_id) -> str:
         "sub": str(user_id),
         "account_id": str(account_id),
         "iat": now,
-        "retro": now + timedelta(minutes=config.access_token_ttl_min),
+        "exp": now + timedelta(minutes=config.access_token_ttl_min),
     }
     return jwt.encode(payload, config.jwt_secret_key, algorithm="HS256")
 
@@ -92,7 +93,7 @@ def generate_refresh_token() -> str:
 
 
 def hash_token(token: str) -> str:
-    """sha256 hex digest — used for refresh tokens, API keys and client keys at rest."""
+    """sha256 hex digest — used for refresh tokens, API keys and public keys at rest."""
     return hashlib.sha256(token.encode()).hexdigest()
 
 
@@ -235,46 +236,46 @@ def require_auth_or_api_key(view):
     return wrapper
 
 
-def _presented_environment_key() -> str:
-    raw = request.headers.get("X-Environment-Key", "").strip()
+def presented_project_key() -> str:
+    """The raw public key from ``X-Project-Key``, a bearer token, or the
+    ``project_key`` field (JSON body, form body or query string)."""
+    raw = request.headers.get("X-Project-Key", "").strip()
     if raw:
         return raw
     token = _bearer_token()
-    return token if token.startswith(ENV_KEY_PREFIX) else ""
+    if token.startswith(PUBLIC_KEY_PREFIX):
+        return token
+    data = request.get_json(silent=True)
+    if isinstance(data, dict) and isinstance(data.get("project_key"), str):
+        return data["project_key"].strip()
+    return (request.form.get("project_key") or request.args.get("project_key") or "").strip()
 
 
-def require_environment_key(view):
-    """Require a valid environment client key (evaluation API).
+def require_project_key(view):
+    """Require a valid project public key (ingest API).
 
-    Sets ``g.project_id``, ``g.environment_id``, ``g.account_id`` plus the
-    keys needed for the Evaluation envelope. No scopes: a client key cannot
-    call the management API at all.
+    Sets ``g.project_id`` and ``g.account_id``. No scopes: a public key cannot
+    call the management API at all. An unknown or rotated key is 401
+    ``invalid_project_key``.
     """
 
     @wraps(view)
     def wrapper(*args, **kwargs):
-        raw = _presented_environment_key()
+        raw = presented_project_key()
         if not raw:
-            raise ApiError(401, "unauthorized", "Missing or invalid environment key.")
+            raise ApiError(401, "invalid_project_key", "Missing or invalid project key.")
         key_hash = hash_token(raw)
         with SessionLocal() as session:
-            row = session.execute(
-                select(Environment, Project)
-                .join(Project, Project.id == Environment.project_id)
-                .where(Environment.client_key_hash == key_hash)
-            ).first()
-            if row is None:
-                raise ApiError(401, "unauthorized", "Missing or invalid environment key.")
-            environment, project = row
+            project = session.scalar(select(Project).where(Project.public_key_hash == key_hash))
+            if project is None:
+                raise ApiError(401, "invalid_project_key", "Missing or invalid project key.")
             g.user_id = None
             g.account_id = project.account_id
             g.project_id = project.id
             g.project_key = project.key
-            g.environment_id = environment.id
-            g.environment_key = environment.key
-        g.auth_method = "environment_key"
+            g.api_key_prefix = project.public_key_prefix
+        g.auth_method = "project_key"
         g.api_key_id = None
-        g.api_key_prefix = environment.client_key_prefix
         g.role = None
         g.scopes = frozenset()
         return view(*args, **kwargs)

@@ -25,7 +25,7 @@ class ApiError(Exception):
     extra:
         Optional extra keys merged into the ``error`` object. For the
         limit-reached case the contract expects a ``which`` key, so we pass
-        ``extra={"which": "flags"}``.
+        ``extra={"which": "projects"}``.
     """
 
     def __init__(self, status: int, code: str, message: str, extra: dict | None = None):

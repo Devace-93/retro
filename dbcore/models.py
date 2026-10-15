@@ -1,12 +1,16 @@
 """SQLAlchemy models — the canonical data model for retro.
 
 Tenancy: an Account is the billing entity. Users join accounts via Memberships.
-Product hierarchy: Account -> Project -> (Environment, Flag) -> FlagState, one
-state per (flag, environment). Deleting a project cascades everything under it
-(Postgres ``ON DELETE CASCADE``), so the API never has to clean up by hand.
+Product hierarchy: Account -> Project -> FeedbackItem (+ FeedbackNote, one
+Attachment), RoadmapItem (+ RoadmapVote), ChangelogEntry. Deleting a project
+cascades everything under it (Postgres ``ON DELETE CASCADE``), so the API never
+has to clean up by hand.
 
-Secrets (API keys, environment client keys, refresh tokens) are stored as
-sha256 hashes plus a short non-sensitive prefix; the plaintext is shown once.
+Secrets (API keys, refresh tokens) are stored as sha256 hashes plus a short
+non-sensitive prefix; the plaintext is shown once. A project's *public key*
+(``retro_pub_…``) is not a secret — it ships inside the widget snippet — so it
+is stored in plaintext as well (``Project.public_key``) and the owner can read
+it back at any time; the hash column is what ingest requests are matched on.
 """
 from __future__ import annotations
 
@@ -14,12 +18,14 @@ import uuid
 from datetime import date, datetime
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     Date,
     DateTime,
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -115,9 +121,12 @@ class Subscription(Base):
 
 
 # --------------------------------------------------------------------------- #
-# Product: projects, environments, flags, states
+# Product: projects, feedback, boards
 # --------------------------------------------------------------------------- #
 class Project(Base):
+    """One project per host app. Owns the public key the app posts feedback
+    with, and the settings of its public board (``/b/<board_slug>``)."""
+
     __tablename__ = "projects"
     __table_args__ = (
         UniqueConstraint("account_id", "key", name="uq_project_account_key"),
@@ -129,98 +138,225 @@ class Project(Base):
     key: Mapped[str] = mapped_column(String(63), nullable=False)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
+    url: Mapped[str | None] = mapped_column(String(2048))
+
+    # Public (ingest) key. Plaintext is kept because it is not a secret; the
+    # hash is the lookup column for ingest requests. Rotation replaces all three.
+    public_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    public_key_hash: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
+    public_key_prefix: Mapped[str] = mapped_column(String(16), nullable=False)
+
+    # Public board (roadmap + changelog). The slug is GLOBALLY unique because
+    # boards live at /b/<slug> without an account segment.
+    board_slug: Mapped[str] = mapped_column(String(63), nullable=False, unique=True, index=True)
+    board_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    board_title: Mapped[str | None] = mapped_column(String(120))
+    board_intro: Mapped[str | None] = mapped_column(Text)
+    allow_votes: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    allow_board_submissions: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
+
+    # Widget / ingest settings.
+    types_enabled: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=lambda: ["bug", "feedback", "feature"],
+        server_default='["bug", "feedback", "feature"]',
+    )
+    allow_screenshots: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    allow_email: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    widget_accent: Mapped[str | None] = mapped_column(String(9))  # "#rrggbb"
+
+    # Last per-project feedback number handed out (see dbcore.feedback.next_number).
+    last_feedback_number: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
     account: Mapped[Account] = relationship(back_populates="projects")
-    environments: Mapped[list["Environment"]] = relationship(
-        back_populates="project", cascade="all, delete-orphan", passive_deletes=True,
-        order_by="Environment.position",
+    feedback_items: Mapped[list["FeedbackItem"]] = relationship(
+        back_populates="project", cascade="all, delete-orphan", passive_deletes=True
     )
-    flags: Mapped[list["Flag"]] = relationship(
-        back_populates="project", cascade="all, delete-orphan", passive_deletes=True,
+    roadmap_items: Mapped[list["RoadmapItem"]] = relationship(
+        back_populates="project", cascade="all, delete-orphan", passive_deletes=True
+    )
+    changelog_entries: Mapped[list["ChangelogEntry"]] = relationship(
+        back_populates="project", cascade="all, delete-orphan", passive_deletes=True
     )
 
 
-class Environment(Base):
-    __tablename__ = "environments"
-    __table_args__ = (UniqueConstraint("project_id", "key", name="uq_environment_project_key"),)
+class RoadmapItem(Base):
+    """A card on the project's public roadmap. Feedback items can be linked to
+    one (``FeedbackItem.roadmap_item_id``); end users vote on public ones."""
+
+    __tablename__ = "roadmap_items"
+    __table_args__ = (Index("ix_roadmap_items_project_status", "project_id", "status", "position"),)
 
     id: Mapped[uuid.UUID] = _pk()
     project_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    key: Mapped[str] = mapped_column(String(63), nullable=False)
-    name: Mapped[str] = mapped_column(String(120), nullable=False)
-    # SDK client key at rest: sha256 hash + the first chars for display
-    # (``retro_pub_AbCd``). The plaintext is returned once on create / rotate.
-    client_key_hash: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
-    client_key_prefix: Mapped[str] = mapped_column(String(16), nullable=False)
-    position: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
-    )
-
-    project: Mapped[Project] = relationship(back_populates="environments")
-    states: Mapped[list["FlagState"]] = relationship(
-        back_populates="environment", cascade="all, delete-orphan", passive_deletes=True
-    )
-
-
-class Flag(Base):
-    __tablename__ = "flags"
-    __table_args__ = (UniqueConstraint("project_id", "key", name="uq_flag_project_key"),)
-
-    id: Mapped[uuid.UUID] = _pk()
-    project_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    key: Mapped[str] = mapped_column(String(99), nullable=False)
-    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    title: Mapped[str] = mapped_column(String(140), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
-    kind: Mapped[str] = mapped_column(String(10), nullable=False, default="boolean")  # boolean|string|number|json
-    # JSON value matching `kind`; always `true` for boolean flags.
-    default_value: Mapped[object] = mapped_column(JSONB, nullable=True)
-    tags: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
-    archived: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="planned")  # planned|in_progress|done
+    position: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    public: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    # Denormalised vote count (kept in sync by the boards blueprint).
+    votes: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
-    project: Mapped[Project] = relationship(back_populates="flags")
-    states: Mapped[list["FlagState"]] = relationship(
-        back_populates="flag", cascade="all, delete-orphan", passive_deletes=True
+    project: Mapped[Project] = relationship(back_populates="roadmap_items")
+    feedback_items: Mapped[list["FeedbackItem"]] = relationship(back_populates="roadmap_item")
+    vote_rows: Mapped[list["RoadmapVote"]] = relationship(
+        back_populates="roadmap_item", cascade="all, delete-orphan", passive_deletes=True
     )
 
 
-class FlagState(Base):
-    """One row per (flag, environment): the switch an SDK actually reads."""
+class RoadmapVote(Base):
+    """One anonymous vote. ``voter_id`` is a UUID the browser keeps in
+    localStorage; ``ip_hash`` (daily salted) limits one vote per address per day."""
 
-    __tablename__ = "flag_states"
+    __tablename__ = "roadmap_votes"
     __table_args__ = (
-        UniqueConstraint("flag_id", "environment_id", name="uq_flag_state"),
-        Index("ix_flag_states_environment", "environment_id"),
+        UniqueConstraint("roadmap_item_id", "voter_id", name="uq_roadmap_vote_voter"),
+        Index("ix_roadmap_votes_item_ip", "roadmap_item_id", "ip_hash"),
     )
 
     id: Mapped[uuid.UUID] = _pk()
-    flag_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("flags.id", ondelete="CASCADE"), nullable=False)
-    environment_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("environments.id", ondelete="CASCADE"), nullable=False
+    roadmap_item_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("roadmap_items.id", ondelete="CASCADE"), nullable=False
     )
-    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
-    # Per-environment override of the flag's default_value (null = use default).
-    value: Mapped[object] = mapped_column(JSONB, nullable=True)
-    rollout_percent: Mapped[int] = mapped_column(Integer, nullable=False, default=100, server_default="100")
+    voter_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    ip_hash: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    roadmap_item: Mapped[RoadmapItem] = relationship(back_populates="vote_rows")
+
+
+class FeedbackItem(Base):
+    """One submission from an end user (bug report, feedback, feature request)."""
+
+    __tablename__ = "feedback_items"
+    __table_args__ = (
+        UniqueConstraint("project_id", "number", name="uq_feedback_project_number"),
+        Index("ix_feedback_project_created", "project_id", "created_at"),
+        Index("ix_feedback_project_status", "project_id", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    number: Mapped[int] = mapped_column(Integer, nullable=False)          # per-project, 1-based, shown as #123
+    type: Mapped[str] = mapped_column(String(10), nullable=False)          # bug | feedback | feature
+    sentiment: Mapped[str | None] = mapped_column(String(10))              # positive | negative | neutral
+    title: Mapped[str] = mapped_column(String(140), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(12), nullable=False, default="new", server_default="new")
+    priority: Mapped[str] = mapped_column(String(8), nullable=False, default="none", server_default="none")
+    tags: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    reporter_email: Mapped[str | None] = mapped_column(String(255))
+    reporter_id: Mapped[str | None] = mapped_column(String(120))
+    page_url: Mapped[str | None] = mapped_column(String(2048))
+    app_version: Mapped[str | None] = mapped_column(String(60))
+    locale: Mapped[str | None] = mapped_column(String(16))
+    user_agent: Mapped[str | None] = mapped_column(String(255))
+    metadata_: Mapped[dict] = mapped_column("metadata", JSONB, nullable=False, default=dict, server_default="{}")
+    source: Mapped[str] = mapped_column(String(10), nullable=False, default="api", server_default="api")  # api|widget|board
+    # Daily-salted hash of the reporter's address; never the address itself.
+    ip_hash: Mapped[str | None] = mapped_column(String(64))
+    roadmap_item_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("roadmap_items.id", ondelete="SET NULL"), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
-    flag: Mapped[Flag] = relationship(back_populates="states")
-    environment: Mapped[Environment] = relationship(back_populates="states")
+    project: Mapped[Project] = relationship(back_populates="feedback_items")
+    roadmap_item: Mapped[RoadmapItem | None] = relationship(back_populates="feedback_items")
+    notes: Mapped[list["FeedbackNote"]] = relationship(
+        back_populates="item", cascade="all, delete-orphan", passive_deletes=True,
+        order_by="FeedbackNote.created_at",
+    )
+    attachment: Mapped["Attachment | None"] = relationship(
+        back_populates="item", cascade="all, delete-orphan", passive_deletes=True, uselist=False
+    )
+
+
+class FeedbackNote(Base):
+    """Internal note by a dashboard user on a feedback item (never public)."""
+
+    __tablename__ = "feedback_notes"
+
+    id: Mapped[uuid.UUID] = _pk()
+    feedback_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("feedback_items.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    author_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    # API-key authors have no user; keep a label (key prefix) for display.
+    author_label: Mapped[str | None] = mapped_column(String(120))
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    item: Mapped[FeedbackItem] = relationship(back_populates="notes")
+    author: Mapped[User | None] = relationship()
+
+
+class Attachment(Base):
+    """The (single) screenshot of a feedback item, stored inline in Postgres.
+
+    Inline bytes keep self-hosting a one-container affair; the per-account
+    ``attachment_storage_mb`` cap (``dbcore.usage.attachment_bytes``) bounds
+    the table. ``account_id`` is denormalised so that cap is one indexed SUM.
+    """
+
+    __tablename__ = "attachments"
+
+    id: Mapped[uuid.UUID] = _pk()
+    feedback_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("feedback_items.id", ondelete="CASCADE"), nullable=False, unique=True
+    )
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    content_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    size: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    width: Mapped[int | None] = mapped_column(Integer)
+    height: Mapped[int | None] = mapped_column(Integer)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    item: Mapped[FeedbackItem] = relationship(back_populates="attachment")
+
+
+class ChangelogEntry(Base):
+    """A release note. ``published_at`` null = draft (dashboard only)."""
+
+    __tablename__ = "changelog_entries"
+    __table_args__ = (Index("ix_changelog_project_published", "project_id", "published_at"),)
+
+    id: Mapped[uuid.UUID] = _pk()
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    title: Mapped[str] = mapped_column(String(140), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)       # Markdown (safe subset rendered client-side)
+    version: Mapped[str | None] = mapped_column(String(60))
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    roadmap_item_ids: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    project: Mapped[Project] = relationship(back_populates="changelog_entries")
 
 
 # --------------------------------------------------------------------------- #
@@ -234,9 +370,10 @@ class UsageCounter(Base):
     account_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
     period_start: Mapped[date] = mapped_column(Date, nullable=False)
     period_end: Mapped[date] = mapped_column(Date, nullable=False)
-    evaluations: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
-    # set once when the evaluations limit is first hit in a period (for one-shot PostHog event)
-    evaluations_limit_notified: Mapped[bool] = mapped_column(
+    # Accepted feedback submissions (ingest + board) this period. Soft limit.
+    feedback: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    # set once when the feedback limit is first hit in a period (for one-shot PostHog event)
+    feedback_limit_notified: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
     )
 
@@ -281,7 +418,7 @@ class AuditEvent(Base):
     actor_type: Mapped[str] = mapped_column(String(20), nullable=False)     # user | api_key | system
     actor_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))  # user id or api key id
     actor_label: Mapped[str | None] = mapped_column(String(120))            # e.g. key prefix
-    action: Mapped[str] = mapped_column(String(60), nullable=False)         # flag.create, auth.denied, ...
+    action: Mapped[str] = mapped_column(String(60), nullable=False)         # feedback.update, auth.denied, ...
     target_type: Mapped[str | None] = mapped_column(String(40))
     target_id: Mapped[str | None] = mapped_column(String(64))
     outcome: Mapped[str] = mapped_column(String(20), nullable=False, default="ok", server_default="ok")  # ok | denied | error
