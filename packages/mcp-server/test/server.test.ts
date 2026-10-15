@@ -9,9 +9,19 @@ import { ElicitRequestSchema, type CallToolResult } from "@modelcontextprotocol/
 
 import { MemoryAuditSink } from "../src/audit.js";
 import { RetroClient } from "../src/client.js";
-import { ALL_TOOLS } from "../src/rbac.js";
-import { createExpServer } from "../src/server.js";
-import type { Environment, Flag, FlagState, KeyInfo, Project, Role, Scope } from "../src/types.js";
+import { ALL_TOOLS, allowedTools } from "../src/rbac.js";
+import { createRetroServer } from "../src/server.js";
+import type {
+  ChangelogEntry,
+  FeedbackItem,
+  KeyInfo,
+  Note,
+  Project,
+  RoadmapItem,
+  Role,
+  Scope,
+  Summary,
+} from "../src/types.js";
 
 import roles from "../../shared/api_key_roles.json";
 
@@ -26,19 +36,20 @@ const keyInfo = (role: Role): KeyInfo => ({
 });
 
 const NOW = "2026-10-15T00:00:00Z";
-const DEFAULT_STATE = (): FlagState => ({ enabled: false, value: null, rollout_percent: 100, updated_at: NOW });
-const DEFAULT_ENVS = ["production", "staging", "development"];
 
 const json = (status: number, body: unknown) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 const notFound = (what: string) => json(404, { error: { code: "not_found", message: `${what} not found.` } });
 
+type StoredProject = Project & { notes: Map<string, Note[]> };
+
 /** Just enough of the retro REST API to exercise every tool, with scope checks. */
 class FakeApi {
-  projects = new Map<string, Project & { environments: Environment[] }>();
-  flags = new Map<string, Flag>();
-  limitReached: null | "projects" | "environments" | "flags" = null;
-  copyDisabled = false;
+  projects = new Map<string, StoredProject>();
+  feedback = new Map<string, FeedbackItem>();
+  roadmap = new Map<string, RoadmapItem>();
+  changelog = new Map<string, ChangelogEntry>();
+  limitReached: null | "projects" | "roadmap_items" = null;
   calls: string[] = [];
   private n = 0;
 
@@ -50,30 +61,59 @@ class FakeApi {
       : json(403, { error: { code: "insufficient_scope", message: `lacks ${scope}`, required_scope: scope, role: this.role } });
   }
 
-  private env(key: string, position: number): Environment {
+  private counts(p: Project) {
+    const items = this.feedbackOf(p.id);
+    return { feedback: items.length, new: items.filter((f) => f.status === "new").length, roadmap: this.roadmapOf(p.id).length };
+  }
+
+  private view(p: StoredProject): Project {
+    const { notes: _omit, ...rest } = p;
+    return { ...rest, counts: this.counts(p), board_url: p.board_enabled ? `https://retro.test/b/${p.board_slug}` : null };
+  }
+
+  feedbackOf(projectId: string): FeedbackItem[] {
+    return [...this.feedback.values()].filter((f) => f.project_id === projectId).sort((a, b) => b.number - a.number);
+  }
+
+  roadmapOf(projectId: string): RoadmapItem[] {
+    return [...this.roadmap.values()].filter((r) => r.project_id === projectId).sort((a, b) => a.position - b.position);
+  }
+
+  private findItem(projectId: string, ref: string): FeedbackItem | undefined {
+    return this.feedbackOf(projectId).find((f) => f.id === ref || String(f.number) === ref);
+  }
+
+  /** Test seam: what the ingest API would create. */
+  ingest(projectId: string, input: Partial<FeedbackItem> & { message: string; type?: FeedbackItem["type"] }): FeedbackItem {
     this.n += 1;
-    return {
+    const number = this.feedbackOf(projectId).length + 1;
+    const f: FeedbackItem = {
       id: crypto.randomUUID(),
-      key,
-      name: key[0]!.toUpperCase() + key.slice(1),
-      client_key_prefix: `retro_pub_k${this.n}`,
-      client_key: `retro_pub_k${this.n}secret`,
-      position,
+      project_id: projectId,
+      number,
+      type: input.type ?? "bug",
+      sentiment: input.sentiment ?? null,
+      title: input.title ?? input.message.split("\n")[0]!.slice(0, 80),
+      message: input.message,
+      status: "new",
+      priority: "none",
+      tags: input.tags ?? [],
+      reporter_email: input.reporter_email ?? null,
+      reporter_id: null,
+      page_url: input.page_url ?? null,
+      app_version: null,
+      locale: null,
+      user_agent: "test",
+      metadata: {},
+      source: "api",
+      has_screenshot: Boolean(input.has_screenshot),
+      screenshot: input.has_screenshot ? { content_type: "image/jpeg", size: 1000, width: 10, height: 10 } : null,
+      roadmap_item_id: null,
       created_at: NOW,
+      updated_at: NOW,
     };
-  }
-
-  private view(p: Project & { environments: Environment[] }): Project {
-    // client_key is only returned on create / rotate
-    return { ...p, environments: p.environments.map(({ client_key: _omit, ...e }) => e), flag_count: this.flagsOf(p.id).length };
-  }
-
-  private flagsOf(projectId: string): Flag[] {
-    return [...this.flags.values()].filter((f) => f.project_id === projectId).sort((a, b) => a.key.localeCompare(b.key));
-  }
-
-  private findFlag(projectId: string, ref: string): Flag | undefined {
-    return this.flagsOf(projectId).find((f) => f.id === ref || f.key === ref);
+    this.feedback.set(f.id, f);
+    return f;
   }
 
   fetch = async (input: URL | RequestInfo, init?: RequestInit): Promise<Response> => {
@@ -98,27 +138,32 @@ class FakeApi {
       if (this.limitReached === "projects") return json(402, { error: { code: "limit_reached", message: "Project limit reached.", which: "projects" } });
       const key = body.key ?? String(body.name).toLowerCase().replace(/[^a-z0-9]+/g, "-");
       if ([...this.projects.values()].some((p) => p.key === key)) return json(409, { error: { code: "key_taken", message: `Key ${key} is taken.` } });
-      const p = {
-        id: crypto.randomUUID(), key, name: body.name, description: body.description ?? null, flag_count: 0,
-        environments: DEFAULT_ENVS.map((k, i) => this.env(k, i)), created_at: NOW, updated_at: NOW,
+      this.n += 1;
+      const p: StoredProject = {
+        id: crypto.randomUUID(), key, name: body.name, description: body.description ?? null, url: body.url ?? null,
+        public_key: `retro_pub_k${this.n}secret`, public_key_prefix: `retro_pub_k${this.n}`,
+        board_slug: key, board_enabled: false, board_url: null, board_title: null, board_intro: null,
+        allow_votes: true, allow_board_submissions: true, types_enabled: ["bug", "feedback", "feature"],
+        allow_screenshots: true, allow_email: true, widget_accent: null,
+        counts: { feedback: 0, new: 0, roadmap: 0 }, created_at: NOW, updated_at: NOW, notes: new Map(),
       };
       this.projects.set(p.id, p);
-      return json(201, { ...p }); // with one-time client keys
+      return json(201, this.view(p));
     }
     const pm = path.match(/^\/projects\/([^/]+)(?:\/(.*))?$/);
     if (!pm) {
       if (path === "/account/usage") {
         return this.need("usage:read") ?? json(200, {
-          period_start: "2026-10-01", period_end: "2026-11-01", evaluations: 1234,
+          period_start: "2026-10-01", period_end: "2026-11-01", feedback: 1234, attachment_bytes: 52428800,
           counts: { projects: this.projects.size, api_keys: 1 },
-          limits: { projects: 20, environments_per_project: 10, flags_per_project: 200, evaluations_per_month: 2000000, api_keys: 20 },
+          limits: { projects: 20, api_keys: 20, feedback_per_month: 10000, attachment_storage_mb: 2048, roadmap_items_per_project: 500 },
         });
       }
       if (path === "/account/audit") {
         return this.need("audit:read") ?? json(200, {
           items: [{
             id: "ev-1", ts: NOW, actor_type: "api_key", actor_id: "key-1", actor_label: "retro_live_test",
-            action: "flag_state.update", target_type: "flag", target_id: "f-1", outcome: "ok", meta: { environment: "staging", fields: ["enabled"] },
+            action: "feedback.update", target_type: "feedback", target_id: "f-1", outcome: "ok", meta: { fields: ["status"], from: "new", to: "triaged" },
           }],
         });
       }
@@ -133,6 +178,7 @@ class FakeApi {
       if (method === "PATCH") {
         const denied = this.need("projects:write");
         if (denied) return denied;
+        if (body.board_slug === "api") return json(400, { error: { code: "reserved_slug", message: "Reserved." } });
         Object.assign(project, body);
         return json(200, this.view(project));
       }
@@ -140,142 +186,193 @@ class FakeApi {
         const denied = this.need("projects:delete");
         if (denied) return denied;
         this.projects.delete(project.id);
-        for (const f of this.flagsOf(project.id)) this.flags.delete(f.id);
+        for (const f of this.feedbackOf(project.id)) this.feedback.delete(f.id);
+        for (const r of this.roadmapOf(project.id)) this.roadmap.delete(r.id);
         return new Response(null, { status: 204 });
       }
     }
-    if (sub === "export") {
-      return this.need("flags:read") ?? json(200, {
-        format: "retro.project.v1", exported_at: NOW,
-        project: { key: project.key, name: project.name, description: project.description },
-        environments: project.environments.map(({ key, name, position }) => ({ key, name, position })),
-        flags: this.flagsOf(project.id).map(({ key, name, description, kind, default_value, tags, archived, states }) => ({
-          key, name, description, kind, default_value, tags, archived,
-          states: Object.fromEntries(Object.entries(states).map(([k, s]) => [k, { enabled: s.enabled, value: s.value, rollout_percent: s.rollout_percent }])),
-        })),
-      });
-    }
-
-    // --- environments ---
-    if (sub === "environments" && method === "POST") {
+    if (sub === "rotate-key" && method === "POST") {
       const denied = this.need("projects:write");
       if (denied) return denied;
-      if (this.limitReached === "environments") return json(402, { error: { code: "limit_reached", message: "Environment limit reached.", which: "environments" } });
-      if (project.environments.some((e) => e.key === body.key)) return json(409, { error: { code: "key_taken", message: "Environment key taken." } });
-      const e = this.env(body.key, project.environments.length);
-      if (body.name) e.name = body.name;
-      project.environments.push(e);
-      for (const f of this.flagsOf(project.id)) f.states[e.key] = DEFAULT_STATE();
-      return json(201, e);
-    }
-    const em = sub.match(/^environments\/([^/]+)\/rotate-key$/);
-    if (em && method === "POST") {
-      const denied = this.need("projects:write");
-      if (denied) return denied;
-      const e = project.environments.find((x) => x.id === em[1]);
-      if (!e) return notFound("Environment");
       this.n += 1;
-      e.client_key_prefix = `retro_pub_r${this.n}`;
-      e.client_key = `retro_pub_r${this.n}secret`;
-      return json(200, { client_key: e.client_key, client_key_prefix: e.client_key_prefix });
+      project.public_key = `retro_pub_r${this.n}secret`;
+      project.public_key_prefix = `retro_pub_r${this.n}`;
+      return json(200, { public_key: project.public_key, public_key_prefix: project.public_key_prefix });
+    }
+    if (sub === "summary") {
+      const denied = this.need("feedback:read");
+      if (denied) return denied;
+      const items = this.feedbackOf(project.id);
+      const count = (key: (f: FeedbackItem) => string | null) => {
+        const out: Record<string, number> = {};
+        for (const f of items) { const k = key(f); if (k) out[k] = (out[k] ?? 0) + 1; }
+        return out;
+      };
+      const tags = count((f) => f.tags[0] ?? null);
+      const s: Summary = {
+        project_id: project.id, total: items.length, by_status: count((f) => f.status), by_type: count((f) => f.type),
+        by_sentiment: count((f) => f.sentiment), last_7_days: items.length, last_30_days: items.length,
+        top_tags: Object.entries(tags).map(([tag, c]) => ({ tag, count: c })),
+      };
+      return json(200, s);
+    }
+    if (sub === "tags") {
+      const denied = this.need("feedback:read");
+      if (denied) return denied;
+      const tags: Record<string, number> = {};
+      for (const f of this.feedbackOf(project.id)) for (const t of f.tags) tags[t] = (tags[t] ?? 0) + 1;
+      return json(200, { tags: Object.entries(tags).map(([tag, count]) => ({ tag, count })) });
     }
 
-    // --- flags ---
-    if (sub === "flags" && method === "GET") {
-      const denied = this.need("flags:read");
+    // --- feedback ---
+    if (sub === "feedback" && method === "GET") {
+      const denied = this.need("feedback:read");
       if (denied) return denied;
-      const inc = url.searchParams.get("include_archived") === "true";
-      const items = this.flagsOf(project.id).filter((f) => inc || !f.archived);
-      return json(200, { items, page: 1, per_page: 50, total: items.length });
+      let items = this.feedbackOf(project.id);
+      const status = url.searchParams.get("status");
+      if (status) items = items.filter((f) => status.split(",").includes(f.status));
+      const type = url.searchParams.get("type");
+      if (type) items = items.filter((f) => type.split(",").includes(f.type));
+      const q = url.searchParams.get("q");
+      if (q) items = items.filter((f) => f.message.includes(q) || f.title.includes(q));
+      if (url.searchParams.get("sort") === "oldest") items = [...items].reverse();
+      return json(200, { items: items.map(({ notes: _n, ...f }) => f), page: Number(url.searchParams.get("page") ?? 1), per_page: Number(url.searchParams.get("per_page") ?? 50), total: items.length });
     }
-    if (sub === "flags" && method === "POST") {
-      const denied = this.need("flags:write");
-      if (denied) return denied;
-      if (this.limitReached === "flags") return json(402, { error: { code: "limit_reached", message: "Flag limit reached.", which: "flags" } });
-      if (this.findFlag(project.id, body.key)) return json(409, { error: { code: "key_taken", message: `Flag ${body.key} exists.` } });
-      const kind = body.kind ?? "boolean";
-      const states: Record<string, FlagState> = {};
-      for (const e of project.environments) states[e.key] = { ...DEFAULT_STATE(), ...(body.states?.[e.key] ?? {}) };
-      const f: Flag = {
-        id: crypto.randomUUID(), project_id: project.id, key: body.key, name: body.name ?? body.key, description: body.description ?? null,
-        kind, default_value: kind === "boolean" ? true : body.default_value ?? null, tags: body.tags ?? [], archived: false, states,
-        created_at: NOW, updated_at: NOW,
-      };
-      this.flags.set(f.id, f);
-      return json(201, f);
-    }
-    if (sub === "flags/copy" && method === "POST") {
-      const denied = this.need("flags:write");
-      if (denied) return denied;
-      if (this.copyDisabled) return json(503, { error: { code: "feature_disabled", message: "flag-copy is off." } });
-      const target = this.projects.get(body.target_project_id);
-      if (!target) return notFound("Target project");
-      const result = { target_project_id: target.id, copied: [] as string[], overwritten: [] as string[], skipped: [] as string[] };
-      const keys: string[] = body.flag_keys ?? this.flagsOf(project.id).filter((f) => !f.archived).map((f) => f.key);
-      for (const key of keys) {
-        const src = this.findFlag(project.id, key)!;
-        const existing = this.findFlag(target.id, key);
-        if (existing && (body.on_conflict ?? "skip") === "skip") { result.skipped.push(key); continue; }
-        if (existing) this.flags.delete(existing.id);
-        const states: Record<string, FlagState> = {};
-        for (const e of target.environments) states[e.key] = body.include_states === false ? DEFAULT_STATE() : { ...(src.states[e.key] ?? DEFAULT_STATE()) };
-        this.flags.set(crypto.randomUUID(), { ...src, id: crypto.randomUUID(), project_id: target.id, states });
-        (existing ? result.overwritten : result.copied).push(key);
-      }
-      return json(200, result);
-    }
-    if (sub === "flags/evaluate" && method === "GET") {
-      const denied = this.need("flags:read");
-      if (denied) return denied;
-      const e = project.environments.find((x) => x.key === url.searchParams.get("environment"));
-      if (!e) return notFound("Environment");
-      const flags: Record<string, unknown> = {};
-      for (const f of this.flagsOf(project.id)) {
-        if (f.archived) continue;
-        const s = f.states[e.key]!;
-        const on = s.enabled && s.rollout_percent === 100;
-        flags[f.key] = { kind: f.kind, enabled: on, value: f.kind === "boolean" ? on : on ? s.value ?? f.default_value : null };
-      }
-      return json(200, { project: { id: project.id, key: project.key }, environment: { id: e.id, key: e.key }, distinct_id: url.searchParams.get("distinct_id"), evaluated_at: NOW, flags });
-    }
-    const fm = sub.match(/^flags\/([^/]+)(?:\/states\/([^/]+))?$/);
+    const fm = sub.match(/^feedback\/([^/]+)(?:\/(notes|promote|screenshot)(?:\/([^/]+))?)?$/);
     if (fm) {
-      const f = this.findFlag(project.id, decodeURIComponent(fm[1]!));
-      if (!f) return notFound("Flag");
-      if (fm[2] && method === "PUT") {
-        const denied = this.need("flags:write");
-        if (denied) return denied;
-        const s = f.states[fm[2]];
-        if (!s) return notFound("Environment");
-        Object.assign(s, body, { updated_at: NOW });
-        return json(200, f);
+      const f = this.findItem(project.id, decodeURIComponent(fm[1]!));
+      if (!f) return notFound("Feedback item");
+      const action = fm[2];
+      if (!action) {
+        if (method === "GET") return this.need("feedback:read") ?? json(200, { ...f, notes: project.notes.get(f.id) ?? [] });
+        if (method === "PATCH") {
+          const denied = this.need("feedback:write");
+          if (denied) return denied;
+          Object.assign(f, body, { updated_at: NOW });
+          return json(200, f);
+        }
+        if (method === "DELETE") {
+          const denied = this.need("feedback:delete");
+          if (denied) return denied;
+          this.feedback.delete(f.id);
+          return new Response(null, { status: 204 });
+        }
       }
-      if (method === "GET") return this.need("flags:read") ?? json(200, f);
-      if (method === "PATCH") {
-        const denied = this.need("flags:write");
+      if (action === "notes" && method === "POST") {
+        const denied = this.need("feedback:write");
         if (denied) return denied;
-        if (body.kind && body.kind !== f.kind) for (const s of Object.values(f.states)) s.value = null;
-        Object.assign(f, body);
-        return json(200, f);
+        const note: Note = { id: crypto.randomUUID(), body: body.body, author: null, created_at: NOW };
+        project.notes.set(f.id, [...(project.notes.get(f.id) ?? []), note]);
+        return json(201, note);
+      }
+      if (action === "promote" && method === "POST") {
+        const denied = this.need("feedback:write") ?? this.need("board:write");
+        if (denied) return denied;
+        if (f.roadmap_item_id) return json(200, { item: f, roadmap_item: this.roadmap.get(f.roadmap_item_id) });
+        if (this.limitReached === "roadmap_items") return json(402, { error: { code: "limit_reached", message: "Roadmap limit reached.", which: "roadmap_items" } });
+        const r = this.makeRoadmap(project.id, { title: body.title ?? f.title, description: body.description ?? f.message, status: body.status ?? "planned" });
+        r.feedback_count = 1;
+        f.roadmap_item_id = r.id;
+        if (!["in_progress", "done"].includes(f.status)) f.status = "planned";
+        return json(201, { item: f, roadmap_item: r });
+      }
+    }
+
+    // --- roadmap ---
+    if (sub === "roadmap" && method === "GET") {
+      const denied = this.need("board:read");
+      if (denied) return denied;
+      let items = this.roadmapOf(project.id);
+      const status = url.searchParams.get("status");
+      if (status) items = items.filter((r) => r.status === status);
+      return json(200, { items });
+    }
+    if (sub === "roadmap" && method === "POST") {
+      const denied = this.need("board:write");
+      if (denied) return denied;
+      if (this.limitReached === "roadmap_items") return json(402, { error: { code: "limit_reached", message: "Roadmap limit reached.", which: "roadmap_items" } });
+      return json(201, this.makeRoadmap(project.id, body));
+    }
+    const rm = sub.match(/^roadmap\/([^/]+)$/);
+    if (rm) {
+      const r = this.roadmap.get(rm[1]!);
+      if (!r || r.project_id !== project.id) return notFound("Roadmap item");
+      if (method === "PATCH") {
+        const denied = this.need("board:write");
+        if (denied) return denied;
+        Object.assign(r, body, { updated_at: NOW });
+        if (body.status === "done") r.completed_at = NOW;
+        for (const f of this.feedbackOf(project.id)) if (f.roadmap_item_id === r.id && body.status) f.status = body.status;
+        return json(200, r);
       }
       if (method === "DELETE") {
-        const denied = this.need("flags:delete");
+        const denied = this.need("board:delete");
         if (denied) return denied;
-        this.flags.delete(f.id);
+        this.roadmap.delete(r.id);
+        for (const f of this.feedbackOf(project.id)) if (f.roadmap_item_id === r.id) f.roadmap_item_id = null;
+        return new Response(null, { status: 204 });
+      }
+    }
+
+    // --- changelog ---
+    if (sub === "changelog" && method === "GET") {
+      const denied = this.need("board:read");
+      if (denied) return denied;
+      let items = [...this.changelog.values()].filter((c) => c.project_id === project.id);
+      if (url.searchParams.get("include_drafts") === "false") items = items.filter((c) => c.published_at);
+      return json(200, { items });
+    }
+    if (sub === "changelog" && method === "POST") {
+      const denied = this.need("board:write");
+      if (denied) return denied;
+      const c: ChangelogEntry = {
+        id: crypto.randomUUID(), project_id: project.id, title: body.title, body: body.body, version: body.version ?? null,
+        published_at: body.publish ? NOW : null, roadmap_item_ids: [], created_at: NOW, updated_at: NOW,
+      };
+      this.changelog.set(c.id, c);
+      return json(201, c);
+    }
+    const cm = sub.match(/^changelog\/([^/]+)$/);
+    if (cm) {
+      const c = this.changelog.get(cm[1]!);
+      if (!c || c.project_id !== project.id) return notFound("Changelog entry");
+      if (method === "PATCH") {
+        const denied = this.need("board:write");
+        if (denied) return denied;
+        const { published, ...rest } = body;
+        Object.assign(c, rest, { updated_at: NOW });
+        if (published === true && !c.published_at) c.published_at = NOW;
+        if (published === false) c.published_at = null;
+        return json(200, c);
+      }
+      if (method === "DELETE") {
+        const denied = this.need("board:delete");
+        if (denied) return denied;
+        this.changelog.delete(c.id);
         return new Response(null, { status: 204 });
       }
     }
     return notFound(`route ${method} ${path}`);
   };
+
+  private makeRoadmap(projectId: string, body: { title: string; description?: string; status?: RoadmapItem["status"]; public?: boolean }): RoadmapItem {
+    const r: RoadmapItem = {
+      id: crypto.randomUUID(), project_id: projectId, title: body.title, description: body.description ?? null,
+      status: body.status ?? "planned", position: this.roadmapOf(projectId).length, public: body.public ?? true,
+      votes: 0, feedback_count: 0, completed_at: null, created_at: NOW, updated_at: NOW,
+    };
+    this.roadmap.set(r.id, r);
+    return r;
+  }
 }
 
 type Elicit = (message: string) => Promise<{ action: "accept" | "decline" | "cancel"; content?: Record<string, unknown> }>;
 
-async function connect(role: Role, opts: { elicit?: Elicit; apiRole?: Role } = {}) {
-  const api = new FakeApi(opts.apiRole ?? role);
+async function connect(role: Role, opts: { elicit?: Elicit; apiRole?: Role; api?: FakeApi } = {}) {
+  const api = opts.api ?? new FakeApi(opts.apiRole ?? role);
   const client = new RetroClient({ baseUrl: "http://fake/api", apiKey: "retro_live_test", fetch: api.fetch as typeof fetch });
   const audit = new MemoryAuditSink();
-  const server = createExpServer({ client, keyInfo: keyInfo(role), audit, transport: "test" });
+  const server = createRetroServer({ client, keyInfo: keyInfo(role), audit, transport: "test" });
 
   const mcp = new Client({ name: "test-client", version: "0.0.0" }, { capabilities: opts.elicit ? { elicitation: { form: {} } } : {} });
   if (opts.elicit) mcp.setRequestHandler(ElicitRequestSchema, async (req) => opts.elicit!(req.params.message));
@@ -289,33 +386,38 @@ async function connect(role: Role, opts: { elicit?: Elicit; apiRole?: Role } = {
   const toolNames = async () => (await mcp.listTools()).tools.map((t) => t.name).sort();
   const textOf = (r: CallToolResult) => r.content.map((c) => (c.type === "text" ? c.text : "")).join("\n");
   const project = async (name = "Web app") => (await call("create_project", { name })).structuredContent as Project;
-  const flag = async (project_id: string, key = "new-checkout", extra: Record<string, unknown> = {}) =>
-    (await call("create_flag", { project_id, key, ...extra })).structuredContent as Flag;
-  return { api, mcp, audit, server, call, toolNames, textOf, project, flag };
+  return { api, mcp, audit, server, call, toolNames, textOf, project };
 }
 
 describe("RBAC: tool visibility follows the key's role", () => {
   test("viewer sees read-only tools only", async () => {
     const { toolNames } = await connect("viewer");
     const names = await toolNames();
-    expect(names).toEqual(["evaluate_flags", "export_project", "get_flag", "get_project", "get_usage", "list_flags", "list_projects"]);
-    expect(names).not.toContain("create_flag");
-    expect(names).not.toContain("delete_flag");
+    expect(names).toEqual(
+      ["feedback_summary", "get_feedback", "get_project", "get_usage", "list_changelog", "list_feedback", "list_projects", "list_roadmap", "list_tags"].sort(),
+    );
+    expect(names).not.toContain("update_feedback");
+    expect(names).not.toContain("delete_feedback");
   });
 
-  test("editor adds create/update/state/copy but no delete or audit", async () => {
+  test("editor adds write tools but no delete or audit", async () => {
     const { toolNames } = await connect("editor");
     const names = await toolNames();
-    for (const t of ["create_project", "update_project", "create_environment", "rotate_environment_key", "create_flag", "update_flag", "set_flag_state", "copy_flags"]) {
+    for (const t of ["create_project", "update_project", "rotate_project_key", "update_feedback", "add_note", "promote_to_roadmap", "create_roadmap_item", "update_roadmap_item", "create_changelog_entry", "update_changelog_entry"]) {
       expect(names).toContain(t);
     }
-    for (const t of ["delete_project", "delete_flag", "get_audit_log"]) expect(names).not.toContain(t);
+    for (const t of ["delete_project", "delete_feedback", "delete_roadmap_item", "delete_changelog_entry", "get_audit_log"]) expect(names).not.toContain(t);
   });
 
   test("admin sees every tool in CONTRACT.md", async () => {
     const { toolNames } = await connect("admin");
     expect(await toolNames()).toEqual([...ALL_TOOLS].sort());
-    expect(ALL_TOOLS).toHaveLength(18);
+    expect(ALL_TOOLS).toHaveLength(24);
+  });
+
+  test("promote_to_roadmap needs BOTH feedback:write and board:write", () => {
+    expect(allowedTools(["feedback:read", "feedback:write"])).not.toContain("promote_to_roadmap");
+    expect(allowedTools(["feedback:write", "board:write"])).toContain("promote_to_roadmap");
   });
 
   test("a hidden tool cannot be called", async () => {
@@ -337,16 +439,16 @@ describe("RBAC: tool visibility follows the key's role", () => {
   });
 });
 
-describe("projects and environments", () => {
-  test("create_project returns environments with one-time client keys", async () => {
+describe("projects", () => {
+  test("create_project returns the public key and a widget snippet", async () => {
     const c = await connect("editor");
-    const p = await c.project();
+    const r = await c.call("create_project", { name: "Web app", url: "https://example.com" });
+    expect(r.isError).toBeFalsy();
+    const p = r.structuredContent as Project;
     expect(p.key).toBe("web-app");
-    expect(p.environments?.map((e) => e.key)).toEqual(["production", "staging", "development"]);
-    expect(p.environments?.[0]?.client_key).toMatch(/^retro_pub_/);
-    // ...and get_project does not leak them again
-    const again = (await c.call("get_project", { project_id: p.id })).structuredContent as Project;
-    expect(again.environments?.[0]?.client_key).toBeUndefined();
+    expect(p.public_key).toMatch(/^retro_pub_/);
+    expect(p.board_enabled).toBe(false);
+    expect(c.textOf(r)).toContain(`data-project-key="${p.public_key}"`);
     expect((await c.call("list_projects")).structuredContent).toMatchObject({ total: 1 });
   });
 
@@ -364,146 +466,154 @@ describe("projects and environments", () => {
     expect(c.audit.entries.at(-1)?.error?.code).toBe("limit_reached");
   });
 
-  test("create_environment, rotate_environment_key and update_project", async () => {
+  test("update_project enables the board, rotate_project_key issues a new key", async () => {
     const c = await connect("editor");
     const p = await c.project();
-    await c.flag(p.id);
-    const env = (await c.call("create_environment", { project_id: p.id, key: "qa" })).structuredContent as Environment;
-    expect(env.client_key).toMatch(/^retro_pub_/);
-    const f = (await c.call("get_flag", { project_id: p.id, flag: "new-checkout" })).structuredContent as Flag;
-    expect(f.states.qa).toMatchObject({ enabled: false, rollout_percent: 100 });
+    const up = (await c.call("update_project", { project_id: p.id, board_enabled: true, types_enabled: ["bug", "feature"] })).structuredContent as Project;
+    expect(up.board_enabled).toBe(true);
+    expect(up.board_url).toContain("/b/web-app");
+    expect(up.types_enabled).toEqual(["bug", "feature"]);
+    const reserved = await c.call("update_project", { project_id: p.id, board_slug: "api" });
+    expect(reserved.isError).toBe(true);
+    expect(c.textOf(reserved)).toContain("reserved_slug");
 
-    const rot = await c.call("rotate_environment_key", { project_id: p.id, environment_id: env.id });
+    const rot = await c.call("rotate_project_key", { project_id: p.id });
     expect(rot.isError).toBeFalsy();
-    expect((rot.structuredContent as { client_key: string }).client_key).not.toBe(env.client_key);
-
-    const up = (await c.call("update_project", { project_id: p.id, name: "Renamed" })).structuredContent as Project;
-    expect(up.name).toBe("Renamed");
+    expect((rot.structuredContent as { public_key: string }).public_key).not.toBe(p.public_key);
   });
 
   test("invalid input is rejected before reaching the API", async () => {
     const c = await connect("editor");
-    const r = await c.call("create_project", { name: "x", key: "Not A Slug" });
-    expect(r.isError).toBe(true);
-    expect(c.api.calls.filter((x) => x.startsWith("POST"))).toHaveLength(0);
+    const before = c.api.calls.length;
+    expect((await c.call("create_project", { name: "x", key: "Not A Slug" })).isError).toBe(true);
+    expect((await c.call("update_project", { project_id: crypto.randomUUID(), widget_accent: "green" })).isError).toBe(true);
+    expect((await c.call("update_project", { project_id: crypto.randomUUID(), types_enabled: [] })).isError).toBe(true);
+    expect(c.api.calls.length).toBe(before);
   });
 });
 
-describe("flags", () => {
-  test("create_flag returns structured content with a state per environment and audits the call", async () => {
+describe("feedback", () => {
+  test("list_feedback filters, get_feedback by number includes notes, summary and tags", async () => {
     const c = await connect("editor");
     const p = await c.project();
-    const r = await c.call("create_flag", { project_id: p.id, key: "new-checkout", tags: ["checkout"], states: { development: { enabled: true } } });
-    expect(r.isError).toBeFalsy();
-    const f = r.structuredContent as Flag;
-    expect(f.key).toBe("new-checkout");
-    expect(f.kind).toBe("boolean");
-    expect(f.default_value).toBe(true);
-    expect(Object.keys(f.states).sort()).toEqual(["development", "production", "staging"]);
-    expect(f.states.development?.enabled).toBe(true);
-    expect(f.states.production?.enabled).toBe(false);
-    expect(c.textOf(r)).toContain("development: on");
-    const entry = c.audit.entries.find((e) => e.tool === "create_flag");
-    expect(entry?.outcome).toBe("ok");
-    expect(entry?.actor.role).toBe("editor");
-    expect(entry?.args?.key).toBe("new-checkout");
+    const bug = c.api.ingest(p.id, { type: "bug", message: "Export button does nothing\nSteps: click export", tags: ["export"] });
+    c.api.ingest(p.id, { type: "feedback", sentiment: "positive", message: "Love it" });
+    c.api.ingest(p.id, { type: "feature", message: "Dark mode please", has_screenshot: true });
+
+    const all = (await c.call("list_feedback", { project_id: p.id })).structuredContent as { total: number; items: FeedbackItem[] };
+    expect(all.total).toBe(3);
+    const bugs = await c.call("list_feedback", { project_id: p.id, type: "bug", status: "new,triaged" });
+    expect((bugs.structuredContent as { total: number }).total).toBe(1);
+    expect(c.textOf(bugs)).toContain("#1 🐞 new [export]");
+    expect(c.api.calls.at(-1)).toBe(`GET /projects/${p.id}/feedback`);
+
+    await c.call("add_note", { project_id: p.id, item: 1, body: "dup of nothing, real bug" });
+    const got = await c.call("get_feedback", { project_id: p.id, item: 1 });
+    expect(got.isError).toBeFalsy();
+    const f = got.structuredContent as FeedbackItem;
+    expect(f.id).toBe(bug.id);
+    expect(f.notes).toHaveLength(1);
+    expect(c.textOf(got)).toContain("Steps: click export");
+    expect(c.textOf(got)).toContain("real bug");
+
+    const s = await c.call("feedback_summary", { project_id: p.id });
+    expect(s.isError).toBeFalsy();
+    expect((s.structuredContent as Summary).by_type).toEqual({ bug: 1, feedback: 1, feature: 1 });
+    expect(c.textOf(s)).toContain("By sentiment: positive 1");
+
+    const tags = await c.call("list_tags", { project_id: p.id });
+    expect((tags.structuredContent as { tags: unknown[] }).tags).toEqual([{ tag: "export", count: 1 }]);
   });
 
-  test("rollout_percent outside 0-100 and bad kinds are rejected locally", async () => {
+  test("update_feedback triages and audits; invalid enums are rejected locally", async () => {
     const c = await connect("editor");
     const p = await c.project();
+    c.api.ingest(p.id, { message: "Crash on save" });
+    const r = await c.call("update_feedback", { project_id: p.id, item: 1, status: "triaged", priority: "high", tags: ["crash", "save"] });
+    expect(r.isError).toBeFalsy();
+    expect(r.structuredContent).toMatchObject({ status: "triaged", priority: "high", tags: ["crash", "save"] });
+    expect(c.textOf(r)).toContain("triaged prio=high [crash, save]");
+    expect(c.audit.entries.find((e) => e.tool === "update_feedback")?.outcome).toBe("ok");
+
     const before = c.api.calls.length;
-    expect((await c.call("create_flag", { project_id: p.id, key: "a", kind: "float" })).isError).toBe(true);
-    expect((await c.call("set_flag_state", { project_id: p.id, flag: "a", environment: "staging", rollout_percent: 150 })).isError).toBe(true);
-    expect((await c.call("copy_flags", { project_id: p.id, target_project_id: p.id, on_conflict: "merge" })).isError).toBe(true);
+    expect((await c.call("update_feedback", { project_id: p.id, item: 1, status: "wontfix" })).isError).toBe(true);
+    expect((await c.call("update_feedback", { project_id: p.id, item: 1, priority: "urgent" })).isError).toBe(true);
     expect(c.api.calls.length).toBe(before);
   });
 
-  test("set_flag_state, update_flag, get_flag by key, list_flags round-trip", async () => {
+  test("promote_to_roadmap links the item, is idempotent and reports limit_reached", async () => {
     const c = await connect("editor");
     const p = await c.project();
-    await c.flag(p.id, "banner-text", { kind: "string", default_value: "Hello" });
-    const r = await c.call("set_flag_state", { project_id: p.id, flag: "banner-text", environment: "staging", enabled: true, rollout_percent: 25, value: "Hi" });
+    c.api.ingest(p.id, { type: "feature", message: "Dark mode please" });
+    const r = await c.call("promote_to_roadmap", { project_id: p.id, item: 1 });
     expect(r.isError).toBeFalsy();
-    expect((r.structuredContent as Flag).states.staging).toMatchObject({ enabled: true, rollout_percent: 25, value: "Hi" });
-    expect(c.textOf(r)).toContain("banner-text in staging: on at 25%");
-    expect(c.api.calls.at(-1)).toBe("PUT /projects/" + p.id + "/flags/banner-text/states/staging");
+    const out = r.structuredContent as { item: FeedbackItem; roadmap_item: RoadmapItem };
+    expect(out.roadmap_item.title).toBe("Dark mode please");
+    expect(out.roadmap_item.status).toBe("planned");
+    expect(out.item.status).toBe("planned");
+    expect(out.item.roadmap_item_id).toBe(out.roadmap_item.id);
 
-    const up = (await c.call("update_flag", { project_id: p.id, flag: "banner-text", archived: true, kind: "number" })).structuredContent as Flag;
-    expect(up.archived).toBe(true);
-    expect(up.states.staging?.value).toBeNull();
+    const again = (await c.call("promote_to_roadmap", { project_id: p.id, item: 1 })).structuredContent as { roadmap_item: RoadmapItem };
+    expect(again.roadmap_item.id).toBe(out.roadmap_item.id);
 
-    expect(((await c.call("list_flags", { project_id: p.id })).structuredContent as { total: number }).total).toBe(0);
-    expect(((await c.call("list_flags", { project_id: p.id, include_archived: true })).structuredContent as { total: number }).total).toBe(1);
-    const got = (await c.call("get_flag", { project_id: p.id, flag: up.id })).structuredContent as Flag;
-    expect(got.key).toBe("banner-text");
+    c.api.ingest(p.id, { type: "feature", message: "Another" });
+    c.api.limitReached = "roadmap_items";
+    const lim = await c.call("promote_to_roadmap", { project_id: p.id, item: 2 });
+    expect(lim.isError).toBe(true);
+    expect(c.textOf(lim)).toContain('"which":"roadmap_items"');
   });
+});
 
-  test("API errors become isError results with the stable code (limit_reached + which)", async () => {
+describe("roadmap and changelog", () => {
+  test("create / update / list roadmap items; done cascades to linked feedback", async () => {
     const c = await connect("editor");
     const p = await c.project();
-    c.api.limitReached = "flags";
-    const r = await c.call("create_flag", { project_id: p.id, key: "x" });
-    expect(r.isError).toBe(true);
-    expect(c.textOf(r)).toContain("limit_reached");
-    expect(c.textOf(r)).toContain('"which":"flags"');
-    expect(c.audit.entries.at(-1)?.error?.code).toBe("limit_reached");
-    expect(c.audit.entries.at(-1)?.outcome).toBe("error");
+    c.api.ingest(p.id, { type: "feature", message: "Dark mode" });
+    const promoted = (await c.call("promote_to_roadmap", { project_id: p.id, item: 1 })).structuredContent as { roadmap_item: RoadmapItem };
+    const hidden = (await c.call("create_roadmap_item", { project_id: p.id, title: "Secret", public: false })).structuredContent as RoadmapItem;
+    expect(hidden.public).toBe(false);
+
+    const list = await c.call("list_roadmap", { project_id: p.id });
+    expect((list.structuredContent as { items: RoadmapItem[] }).items).toHaveLength(2);
+    expect(c.textOf(list)).toContain("(hidden) Secret");
+
+    const done = (await c.call("update_roadmap_item", { project_id: p.id, roadmap_item_id: promoted.roadmap_item.id, status: "done" })).structuredContent as RoadmapItem;
+    expect(done.completed_at).toBe(NOW);
+    const f = (await c.call("get_feedback", { project_id: p.id, item: 1 })).structuredContent as FeedbackItem;
+    expect(f.status).toBe("done");
+
+    const planned = (await c.call("list_roadmap", { project_id: p.id, status: "planned" })).structuredContent as { items: RoadmapItem[] };
+    expect(planned.items.map((r) => r.id)).toEqual([hidden.id]);
   });
 
-  test("copy_flags skips, overwrites and reports feature_disabled", async () => {
+  test("changelog entries: draft, publish, unpublish, list", async () => {
     const c = await connect("editor");
-    const src = await c.project("Source");
-    const dst = await c.project("Target");
-    await c.flag(src.id, "a", { states: { production: { enabled: true } } });
-    await c.flag(src.id, "b");
-    await c.flag(dst.id, "a");
-    const first = (await c.call("copy_flags", { project_id: src.id, target_project_id: dst.id })).structuredContent as { copied: string[]; skipped: string[] };
-    expect(first.copied).toEqual(["b"]);
-    expect(first.skipped).toEqual(["a"]);
-    const second = (await c.call("copy_flags", { project_id: src.id, target_project_id: dst.id, flag_keys: ["a"], on_conflict: "overwrite" })).structuredContent as { overwritten: string[] };
-    expect(second.overwritten).toEqual(["a"]);
-    const copied = (await c.call("get_flag", { project_id: dst.id, flag: "a" })).structuredContent as Flag;
-    expect(copied.states.production?.enabled).toBe(true);
-    c.api.copyDisabled = true;
-    const off = await c.call("copy_flags", { project_id: src.id, target_project_id: dst.id });
-    expect(off.isError).toBe(true);
-    expect(c.textOf(off)).toContain("feature_disabled");
-  });
+    const p = await c.project();
+    const draft = (await c.call("create_changelog_entry", { project_id: p.id, title: "Dark mode is here", body: "## New\n- dark mode", version: "1.5.0" })).structuredContent as ChangelogEntry;
+    expect(draft.published_at).toBeNull();
+    expect(c.textOf((await c.call("list_changelog", { project_id: p.id })))).toContain("v1.5.0 Dark mode is here — DRAFT");
 
-  test("evaluate_flags and export_project are available to a viewer", async () => {
-    const admin = await connect("admin");
-    const p = await admin.project();
-    await admin.flag(p.id, "a", { states: { production: { enabled: true } } });
-    await admin.flag(p.id, "b");
-    // Reuse the same fake API with a viewer key.
-    const viewer = await connect("viewer");
-    viewer.api.projects = admin.api.projects;
-    viewer.api.flags = admin.api.flags;
-    const ev = await viewer.call("evaluate_flags", { project_id: p.id, environment: "production", distinct_id: "user-42" });
-    expect(ev.isError).toBeFalsy();
-    expect((ev.structuredContent as { flags: Record<string, { enabled: boolean }> }).flags).toEqual({
-      a: { kind: "boolean", enabled: true, value: true },
-      b: { kind: "boolean", enabled: false, value: false },
-    });
-    expect(viewer.api.calls.at(-1)).toBe(`GET /projects/${p.id}/flags/evaluate`);
-    const ex = await viewer.call("export_project", { project_id: p.id });
-    expect(ex.isError).toBeFalsy();
-    const x = ex.structuredContent as { format: string; flags: unknown[]; environments: unknown[] };
-    expect(x.format).toBe("retro.project.v1");
-    expect(x.flags).toHaveLength(2);
-    expect(x.environments).toHaveLength(3);
+    const pub = (await c.call("update_changelog_entry", { project_id: p.id, changelog_entry_id: draft.id, published: true })).structuredContent as ChangelogEntry;
+    expect(pub.published_at).toBe(NOW);
+    const published = (await c.call("list_changelog", { project_id: p.id, include_drafts: false })).structuredContent as { items: ChangelogEntry[] };
+    expect(published.items).toHaveLength(1);
+
+    const un = (await c.call("update_changelog_entry", { project_id: p.id, changelog_entry_id: draft.id, published: false })).structuredContent as ChangelogEntry;
+    expect(un.published_at).toBeNull();
+    const immediate = (await c.call("create_changelog_entry", { project_id: p.id, title: "Hotfix", body: "fixed", publish: true })).structuredContent as ChangelogEntry;
+    expect(immediate.published_at).toBe(NOW);
   });
 
   test("get_usage and get_audit_log return schema-valid structured content", async () => {
     const c = await connect("admin");
     const u = await c.call("get_usage");
     expect(u.isError).toBeFalsy();
-    expect(c.textOf(u)).toContain("1234/2000000 evaluations");
+    expect(c.textOf(u)).toContain("1234/10000 feedback items");
+    expect(c.textOf(u)).toContain("50.0/2048 MB screenshots");
     const a = await c.call("get_audit_log", { limit: 5 });
     expect(a.isError).toBeFalsy();
     expect((a.structuredContent as { items: unknown[] }).items).toHaveLength(1);
-    expect(c.textOf(a)).toContain("flag_state.update");
+    expect(c.textOf(a)).toContain("feedback.update");
   });
 });
 
@@ -511,12 +621,13 @@ describe("destructive tools require human approval", () => {
   test("delete_project refuses without confirmation and succeeds with confirm=true", async () => {
     const c = await connect("admin");
     const p = await c.project();
-    await c.flag(p.id);
+    c.api.ingest(p.id, { message: "x" });
 
     const refused = await c.call("delete_project", { project_id: p.id });
     expect(refused.isError).toBe(true);
     expect(c.textOf(refused)).toContain("confirmation_required");
     expect(c.textOf(refused)).toContain("Web app");
+    expect(c.textOf(refused)).toContain("1 feedback item(s)");
     expect(c.api.projects.has(p.id)).toBe(true);
     expect(c.audit.entries.at(-1)?.outcome).toBe("pending");
     expect(c.api.calls.filter((x) => x.startsWith("DELETE"))).toHaveLength(0);
@@ -525,22 +636,41 @@ describe("destructive tools require human approval", () => {
     expect(done.isError).toBeFalsy();
     expect(done.structuredContent).toEqual({ deleted: true, id: p.id, key: "web-app", name: "Web app" });
     expect(c.api.projects.has(p.id)).toBe(false);
-    expect(c.api.flags.size).toBe(0);
+    expect(c.api.feedback.size).toBe(0);
     expect(c.audit.entries.at(-1)?.outcome).toBe("ok");
   });
 
-  test("delete_flag refuses without confirmation and succeeds with confirm=true", async () => {
+  test("delete_feedback, delete_roadmap_item and delete_changelog_entry follow the same flow", async () => {
     const c = await connect("admin");
     const p = await c.project();
-    const f = await c.flag(p.id);
-    const refused = await c.call("delete_flag", { project_id: p.id, flag: "new-checkout" });
-    expect(refused.isError).toBe(true);
-    expect(c.textOf(refused)).toContain("confirmation_required");
-    expect(c.api.flags.has(f.id)).toBe(true);
-    const done = await c.call("delete_flag", { project_id: p.id, flag: "new-checkout", confirm: true });
-    expect(done.isError).toBeFalsy();
-    expect(done.structuredContent).toEqual({ deleted: true, id: f.id, key: "new-checkout", project_id: p.id });
-    expect(c.api.flags.has(f.id)).toBe(false);
+    const f = c.api.ingest(p.id, { message: "Spam" });
+    const r = (await c.call("create_roadmap_item", { project_id: p.id, title: "Old plan" })).structuredContent as RoadmapItem;
+    const e = (await c.call("create_changelog_entry", { project_id: p.id, title: "Oops", body: "x" })).structuredContent as ChangelogEntry;
+
+    for (const [tool, args] of [
+      ["delete_feedback", { project_id: p.id, item: f.id }],
+      ["delete_roadmap_item", { project_id: p.id, roadmap_item_id: r.id }],
+      ["delete_changelog_entry", { project_id: p.id, changelog_entry_id: e.id }],
+    ] as const) {
+      const refused = await c.call(tool, { ...args });
+      expect(refused.isError).toBe(true);
+      expect(c.textOf(refused)).toContain("confirmation_required");
+    }
+    expect(c.api.calls.filter((x) => x.startsWith("DELETE"))).toHaveLength(0);
+
+    const df = await c.call("delete_feedback", { project_id: p.id, item: f.id, confirm: true });
+    expect(df.structuredContent).toEqual({ deleted: true, id: f.id, number: 1, project_id: p.id });
+    const dr = await c.call("delete_roadmap_item", { project_id: p.id, roadmap_item_id: r.id, confirm: true });
+    expect(dr.structuredContent).toMatchObject({ deleted: true, id: r.id });
+    const de = await c.call("delete_changelog_entry", { project_id: p.id, changelog_entry_id: e.id, confirm: true });
+    expect(de.structuredContent).toMatchObject({ deleted: true, id: e.id });
+    expect(c.api.feedback.size).toBe(0);
+    expect(c.api.roadmap.size).toBe(0);
+    expect(c.api.changelog.size).toBe(0);
+
+    const missing = await c.call("delete_roadmap_item", { project_id: p.id, roadmap_item_id: crypto.randomUUID(), confirm: true });
+    expect(missing.isError).toBe(true);
+    expect(c.textOf(missing)).toContain("not_found");
   });
 
   test("with elicitation, the user is asked and can accept", async () => {
@@ -552,13 +682,13 @@ describe("destructive tools require human approval", () => {
       },
     });
     const p = await c.project();
-    const f = await c.flag(p.id, "a", { states: { staging: { enabled: true } } });
-    const done = await c.call("delete_flag", { project_id: p.id, flag: f.id });
+    const f = c.api.ingest(p.id, { type: "bug", message: "Crash on save" });
+    const done = await c.call("delete_feedback", { project_id: p.id, item: f.id });
     expect(done.isError).toBeFalsy();
     expect(asked).toHaveLength(1);
-    expect(asked[0]).toContain('"a"');
-    expect(asked[0]).toContain("ON in staging");
-    expect(c.api.flags.has(f.id)).toBe(false);
+    expect(asked[0]).toContain("#1");
+    expect(asked[0]).toContain("Crash on save");
+    expect(c.api.feedback.has(f.id)).toBe(false);
   });
 
   test("with elicitation, declining cancels and nothing is deleted", async () => {
@@ -575,30 +705,28 @@ describe("destructive tools require human approval", () => {
 });
 
 describe("resources and prompts", () => {
-  test("projects resource and flags template are exposed for a viewer", async () => {
+  test("projects resource and summary template are exposed for a viewer", async () => {
     const admin = await connect("admin");
     const p = await admin.project();
-    await admin.flag(p.id);
-    const viewer = await connect("viewer");
-    viewer.api.projects = admin.api.projects;
-    viewer.api.flags = admin.api.flags;
+    admin.api.ingest(p.id, { message: "x" });
+    const viewer = await connect("viewer", { api: Object.assign(admin.api, { role: "viewer" as Role }) });
     const res = await viewer.mcp.listResources();
     expect(res.resources.map((r) => r.uri)).toContain("retro://projects");
     const tpl = await viewer.mcp.listResourceTemplates();
-    expect(tpl.resourceTemplates.map((t) => t.uriTemplate)).toContain("retro://projects/{id}/flags");
+    expect(tpl.resourceTemplates.map((t) => t.uriTemplate)).toContain("retro://projects/{id}/summary");
     const list = await viewer.mcp.readResource({ uri: "retro://projects" });
     expect(JSON.parse((list.contents[0] as { text: string }).text).total).toBe(1);
-    const flags = await viewer.mcp.readResource({ uri: `retro://projects/${p.id}/flags` });
-    expect(JSON.parse((flags.contents[0] as { text: string }).text).items[0].key).toBe("new-checkout");
+    const summary = await viewer.mcp.readResource({ uri: `retro://projects/${p.id}/summary` });
+    expect(JSON.parse((summary.contents[0] as { text: string }).text).total).toBe(1);
   });
 
-  test("rollout-plan prompt is available when flags:read is granted", async () => {
+  test("triage_inbox prompt is available when feedback:read is granted", async () => {
     const { mcp } = await connect("viewer");
     const prompts = await mcp.listPrompts();
-    expect(prompts.prompts.map((p) => p.name)).toContain("rollout-plan");
-    const got = await mcp.getPrompt({ name: "rollout-plan", arguments: { project_id: "p-1", flag: "new-checkout" } });
+    expect(prompts.prompts.map((p) => p.name)).toContain("triage_inbox");
+    const got = await mcp.getPrompt({ name: "triage_inbox", arguments: { project_id: "p-1" } });
     const text = (got.messages[0]!.content as { text: string }).text;
     expect(text).toContain('project_id="p-1"');
-    expect(text).toContain("set_flag_state");
+    expect(text).toContain("promote_to_roadmap");
   });
 });

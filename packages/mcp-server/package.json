@@ -1,17 +1,38 @@
 {
   "name": "retro-feedback-mcp",
   "version": "0.1.0",
-  "description": "MCP server for retro, the feature-flag service: manage projects, environments and flags, toggle per-environment states, preview evaluations, with role-based tool access and audit logging.",
+  "description": "MCP server for retro, the user-feedback service: triage bug reports, feedback and feature requests, manage public roadmaps and changelogs, with role-based tool access and audit logging.",
   "license": "MIT",
   "author": "Enrique Magallon Alvarez",
-  "repository": { "type": "git", "url": "https://github.com/Devace-93/retro", "directory": "packages/mcp-server" },
-  "keywords": ["mcp", "model-context-protocol", "feature-flags", "feature-toggles", "retro", "rbac"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Devace-93/retro",
+    "directory": "packages/mcp-server"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "user-feedback",
+    "bug-reports",
+    "feature-requests",
+    "roadmap",
+    "changelog",
+    "retro",
+    "rbac"
+  ],
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "bin": { "retro-feedback-mcp": "./dist/stdio.js" },
-  "files": ["dist", "README.md"],
-  "engines": { "node": ">=20" },
+  "bin": {
+    "retro-feedback-mcp": "./dist/stdio.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "tsx src/stdio.ts",

@@ -1,6 +1,6 @@
-export { createExpServer, buildInstructions, type RetroServerOptions } from "./server.js";
-export { RetroClient, RetroApiError, type ExpClientOptions } from "./client.js";
-export { TOOL_SCOPES, ALL_TOOLS, CONFIRMED_TOOLS, allowedTools, hasScope, type ToolName } from "./rbac.js";
+export { createRetroServer, buildInstructions, type RetroServerOptions } from "./server.js";
+export { RetroClient, RetroApiError, type RetroClientOptions } from "./client.js";
+export { TOOL_SCOPES, ALL_TOOLS, CONFIRMED_TOOLS, allowedTools, hasScope, hasAllScopes, type ToolName } from "./rbac.js";
 export {
   createAuditSink,
   StderrAuditSink,

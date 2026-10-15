@@ -3,7 +3,7 @@ name: Deploy
 # Inert until DEPLOY_HOST and DEPLOY_SSH_KEY secrets are set in the repo.
 on:
   push:
-    branches: [master]
+    branches: [main]
   workflow_dispatch:
 
 concurrency:

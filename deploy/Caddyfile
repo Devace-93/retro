@@ -12,7 +12,16 @@
 		reverse_proxy mcp:3333
 	}
 
-	# --- Marketing + dashboard (Qwik SSR) --- everything else.
+	# --- Widget bundle: a static file served by the web service, embedded by
+	# third-party sites, so it must be cacheable and CORS-open.
+	@widget path /widget.js /widget/*
+	handle @widget {
+		header Cache-Control "public, max-age=300"
+		header Access-Control-Allow-Origin "*"
+		reverse_proxy web:3000
+	}
+
+	# --- Marketing + dashboard + public boards (Qwik SSR) --- everything else.
 	handle {
 		reverse_proxy web:3000
 	}

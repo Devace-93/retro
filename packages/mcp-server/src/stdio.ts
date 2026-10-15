@@ -11,7 +11,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { createAuditSink } from "./audit.js";
 import { RetroApiError, RetroClient } from "./client.js";
 import { loadConfig } from "./config.js";
-import { createExpServer } from "./server.js";
+import { createRetroServer } from "./server.js";
 
 async function main(): Promise<void> {
   const cfg = loadConfig();
@@ -33,7 +33,7 @@ async function main(): Promise<void> {
   }
 
   const audit = createAuditSink(cfg.auditLog);
-  const server = createExpServer({ client, keyInfo, audit, transport: "stdio", allowElicitation: true });
+  const server = createRetroServer({ client, keyInfo, audit, transport: "stdio", allowElicitation: true });
   await server.connect(new StdioServerTransport());
   audit.write({
     ts: new Date().toISOString(),

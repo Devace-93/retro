@@ -1,14 +1,15 @@
 # Production runbook
 
-retro runs on the same Hetzner box as the 3m4 shortener (`/opt/3m4`). That stack's
-Caddy owns ports 80/443, so retro is deployed as a second docker compose project
-without its own Caddy, and the 3m4 Caddy routes `retro.3m4.net` to it.
+retro runs on the same Hetzner box as the 3m4 shortener (`/opt/3m4`) and exp
+(`/opt/exp`). The 3m4 stack's Caddy owns ports 80/443, so retro is deployed as a
+third docker compose project without its own Caddy, and the 3m4 Caddy routes
+`retro.3m4.net` to it over the shared `edge` docker network.
 
 ## First-time setup
 
-1. **Shared network** (once per server):
+1. **Shared network** (once per server; already there if exp is deployed):
    ```sh
-   docker network create edge
+   docker network inspect edge >/dev/null 2>&1 || docker network create edge
    ```
 2. **Clone + configure**
    ```sh
@@ -17,36 +18,59 @@ without its own Caddy, and the 3m4 Caddy routes `retro.3m4.net` to it.
    ```
    Prod `.env` checklist: `APP_BASE_URL=https://retro.3m4.net`,
    `DASHBOARD_URL=https://retro.3m4.net`, `VITE_API_URL=/api`,
-   `VITE_APP_URL=https://retro.3m4.net`, fresh `JWT_SECRET_KEY`, PostHog keys
-   (`POSTHOG_API_KEY`, `POSTHOG_PERSONAL_API_KEY`, `VITE_POSTHOG_KEY`; flags are
-   prefixed `retro-` in the shared PostHog project), RevenueCat keys when billing
-   is switched on, a fresh Postgres password (also in `DATABASE_URL`).
+   `VITE_APP_URL=https://retro.3m4.net`, fresh `JWT_SECRET_KEY` and
+   `IP_HASH_SECRET`, PostHog keys (`POSTHOG_API_KEY`, `POSTHOG_PERSONAL_API_KEY`,
+   `VITE_POSTHOG_KEY`; flags are prefixed `retro-` in the shared PostHog
+   project), RevenueCat keys when billing is switched on, a fresh Postgres
+   password (also in `DATABASE_URL`).
 3. **Start**
    ```sh
    cd /opt/retro/deploy
    docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
    ```
-4. **Edge routing** — in `/opt/3m4`:
-   - `deploy/docker-compose.prod.yml`: attach the `caddy` service to the external
-     `edge` network.
-   - `deploy/Caddyfile.prod`: add
+   Container names are stable (`retro-api-1`, `retro-web-1`, `retro-mcp-1`):
+   compose project `retro`, one replica each. The edge Caddy routes by name.
+4. **Edge routing** — in `/opt/3m4` (branch `deploy/retro-edge-routing` in the
+   3m4 repo adds this):
+   - `deploy/docker-compose.prod.yml`: the `caddy` service is already attached
+     to the external `edge` network (done for exp).
+   - `deploy/Caddyfile.prod`: the block
      ```
      retro.3m4.net {
      	handle /api/* { reverse_proxy retro-api-1:5000 }
-     	handle /mcp*  { reverse_proxy retro-feedback-mcp-1:3333 }
+     	handle /mcp*  { reverse_proxy retro-mcp-1:3333 }
+     	@widget path /widget.js /widget/*
+     	handle @widget {
+     		header Cache-Control "public, max-age=300"
+     		header Access-Control-Allow-Origin "*"
+     		reverse_proxy retro-web-1:3000
+     	}
      	handle        { reverse_proxy retro-web-1:3000 }
      }
      ```
    - `docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --force-recreate caddy`
-5. **DNS (Bluehost)**: A record `retro.3m4.net` → server IP. Caddy issues TLS
-   automatically once DNS resolves.
-6. **Backups**: add `/opt/retro/deploy/backup.sh` to the same crontab as 3m4.
+5. **DNS (Bluehost)**: A record `retro` → the server IP (`46.225.62.18`), same as
+   `exp`. Caddy issues the TLS certificate automatically once DNS resolves.
+6. **Backups**: add `/opt/retro/deploy/backup.sh` to the same crontab as 3m4
+   (nightly, keeps 14 days under `/opt/backups/retro`). Screenshots live in
+   Postgres (bytea), so the dump covers them.
 7. **Deploy-on-push**: in the GitHub repo set secrets `DEPLOY_HOST` and
    `DEPLOY_SSH_KEY`, and repo variable `DEPLOY_ENABLED=true`. After that every
-   push to master redeploys via `.github/workflows/deploy.yml`.
+   push to `main` redeploys via `.github/workflows/deploy.yml`.
+
+## Smoke test after a deploy
+
+```sh
+curl -fsS https://retro.3m4.net/api/healthz
+curl -fsSI https://retro.3m4.net/widget.js | grep -i "access-control-allow-origin"
+curl -fsS -X POST https://retro.3m4.net/api/ingest/feedback \
+  -H "X-Project-Key: retro_pub_…" -H "Content-Type: application/json" \
+  -d '{"type":"feedback","sentiment":"positive","message":"smoke test"}'
+```
 
 ## Scaling
 
 Same path as 3m4: bigger box → managed Postgres (`DATABASE_URL`) → a second
-app node. The evaluation endpoints are stateless and cache-friendly; put a
-short-TTL cache in front of `/api/eval/*` before anything else.
+app node. The ingest endpoints are stateless; rate limits live in Redis. If
+screenshot storage grows past what Postgres should hold, move attachments to
+object storage behind the same `/screenshot` route.

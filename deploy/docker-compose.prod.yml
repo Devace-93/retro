@@ -1,7 +1,8 @@
-# Production overrides. retro shares the Hetzner box with the 3m4 shortener, whose
-# Caddy already owns ports 80/443. retro therefore runs WITHOUT its own Caddy in
-# production: api, web and mcp join the external `edge` network and the 3m4
-# Caddyfile.prod routes retro.3m4.net to them by container name.
+# Production overrides. retro shares the Hetzner box with the 3m4 shortener (and
+# exp), whose Caddy already owns ports 80/443. retro therefore runs WITHOUT its
+# own Caddy in production: api, web and mcp join the external `edge` network and
+# the 3m4 Caddyfile.prod routes retro.3m4.net to them by container name
+# (retro-api-1, retro-web-1, retro-mcp-1).
 #
 #   docker network create edge            # once per server
 #   cd /opt/retro/deploy

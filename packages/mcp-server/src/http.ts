@@ -8,7 +8,7 @@
  *   caller's key, so tenants can never share state. The cost is one
  *   `/apikeys/me` lookup per request, cached briefly per key.
  * - No elicitation here: a stateless server has no back-channel to the user,
- *   so `delete_project` and `delete_flag` falls back to the explicit `confirm=true` flow.
+ *   so the destructive tools fall back to the explicit `confirm=true` flow.
  */
 import { createHash } from "node:crypto";
 
@@ -18,7 +18,7 @@ import express, { type Request, type Response } from "express";
 import { createAuditSink } from "./audit.js";
 import { RetroApiError, RetroClient } from "./client.js";
 import { loadConfig } from "./config.js";
-import { createExpServer } from "./server.js";
+import { createRetroServer } from "./server.js";
 import type { KeyInfo } from "./types.js";
 import { VERSION } from "./version.js";
 
@@ -69,7 +69,7 @@ app.all("/mcp", async (req, res) => {
   }
 
   const client = new RetroClient({ baseUrl: cfg.apiUrl, apiKey });
-  const server = createExpServer({ client, keyInfo, audit, transport: "http", allowElicitation: false });
+  const server = createRetroServer({ client, keyInfo, audit, transport: "http", allowElicitation: false });
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
   res.on("close", () => {
     void transport.close();

@@ -30,6 +30,7 @@ jobs:
           set_var POSTHOG_PERSONAL_API_KEY ""
           set_var VITE_POSTHOG_KEY ""
           set_var JWT_SECRET_KEY e2e-ci-jwt-secret-not-for-production
+          set_var IP_HASH_SECRET e2e-ci-ip-hash-secret-not-for-production
           grep -v -i 'secret\|token' .env
 
       - name: Start the stack

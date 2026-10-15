@@ -6,22 +6,25 @@
  */
 import type {
   AuditEvent,
-  CopyFlagsInput,
-  CopyResult,
-  CreateEnvironmentInput,
-  CreateFlagInput,
+  ChangelogEntry,
+  CreateChangelogInput,
   CreateProjectInput,
-  Environment,
-  Evaluation,
-  Flag,
+  CreateRoadmapInput,
+  FeedbackItem,
   KeyInfo,
+  ListFeedbackParams,
+  Note,
   Paginated,
   Project,
-  ProjectExport,
+  PromoteInput,
+  PromoteResult,
+  RoadmapItem,
   RotatedKey,
-  StatePatch,
-  UpdateFlagInput,
+  Summary,
+  UpdateChangelogInput,
+  UpdateFeedbackInput,
   UpdateProjectInput,
+  UpdateRoadmapInput,
   Usage,
 } from "./types.js";
 import { VERSION } from "./version.js";
@@ -40,7 +43,7 @@ export class RetroApiError extends Error {
   }
 }
 
-export interface ExpClientOptions {
+export interface RetroClientOptions {
   /** Base URL including the `/api` prefix, e.g. `https://retro.3m4.net/api`. */
   baseUrl: string;
   apiKey: string;
@@ -56,7 +59,7 @@ export class RetroClient {
   private readonly apiKey: string;
   private readonly fetchImpl: typeof fetch;
 
-  constructor(opts: ExpClientOptions) {
+  constructor(opts: RetroClientOptions) {
     this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
     this.apiKey = opts.apiKey;
     this.fetchImpl = opts.fetch ?? globalThis.fetch;
@@ -135,65 +138,86 @@ export class RetroClient {
     return this.request("DELETE", `/projects/${enc(id)}`);
   }
 
-  exportProject(id: string): Promise<ProjectExport> {
-    return this.request("GET", `/projects/${enc(id)}/export`);
+  rotateProjectKey(id: string): Promise<RotatedKey> {
+    return this.request("POST", `/projects/${enc(id)}/rotate-key`);
   }
 
-  // --- Environments ------------------------------------------------------ //
-
-  listEnvironments(projectId: string): Promise<Environment[]> {
-    return this.request("GET", `/projects/${enc(projectId)}/environments`);
+  summary(projectId: string): Promise<Summary> {
+    return this.request("GET", `/projects/${enc(projectId)}/summary`);
   }
 
-  createEnvironment(projectId: string, input: CreateEnvironmentInput): Promise<Environment> {
-    return this.request("POST", `/projects/${enc(projectId)}/environments`, { body: input });
+  // --- Feedback ---------------------------------------------------------- //
+
+  listFeedback(projectId: string, params: ListFeedbackParams = {}): Promise<Paginated<FeedbackItem>> {
+    return this.request("GET", `/projects/${enc(projectId)}/feedback`, { query: params as Query });
   }
 
-  rotateEnvironmentKey(projectId: string, envId: string): Promise<RotatedKey> {
-    return this.request("POST", `/projects/${enc(projectId)}/environments/${enc(envId)}/rotate-key`);
+  /** `item` is the item UUID or its per-project number. */
+  getFeedback(projectId: string, item: string | number): Promise<FeedbackItem> {
+    return this.request("GET", `/projects/${enc(projectId)}/feedback/${enc(String(item))}`);
   }
 
-  // --- Flags ------------------------------------------------------------- //
+  updateFeedback(projectId: string, item: string | number, patch: UpdateFeedbackInput): Promise<FeedbackItem> {
+    return this.request("PATCH", `/projects/${enc(projectId)}/feedback/${enc(String(item))}`, { body: patch });
+  }
 
-  listFlags(
+  deleteFeedback(projectId: string, item: string | number): Promise<void> {
+    return this.request("DELETE", `/projects/${enc(projectId)}/feedback/${enc(String(item))}`);
+  }
+
+  addNote(projectId: string, item: string | number, body: string): Promise<Note> {
+    return this.request("POST", `/projects/${enc(projectId)}/feedback/${enc(String(item))}/notes`, {
+      body: { body },
+    });
+  }
+
+  promote(projectId: string, item: string | number, input: PromoteInput = {}): Promise<PromoteResult> {
+    return this.request("POST", `/projects/${enc(projectId)}/feedback/${enc(String(item))}/promote`, {
+      body: input,
+    });
+  }
+
+  listTags(projectId: string): Promise<{ tags: { tag: string; count: number }[] }> {
+    return this.request("GET", `/projects/${enc(projectId)}/tags`);
+  }
+
+  // --- Roadmap ----------------------------------------------------------- //
+
+  listRoadmap(
     projectId: string,
-    params: { q?: string; page?: number; per_page?: number; include_archived?: boolean } = {},
-  ): Promise<Paginated<Flag>> {
-    return this.request("GET", `/projects/${enc(projectId)}/flags`, { query: params });
+    params: { status?: string; include_hidden?: boolean } = {},
+  ): Promise<{ items: RoadmapItem[] }> {
+    return this.request("GET", `/projects/${enc(projectId)}/roadmap`, { query: params });
   }
 
-  createFlag(projectId: string, input: CreateFlagInput): Promise<Flag> {
-    return this.request("POST", `/projects/${enc(projectId)}/flags`, { body: input });
+  createRoadmapItem(projectId: string, input: CreateRoadmapInput): Promise<RoadmapItem> {
+    return this.request("POST", `/projects/${enc(projectId)}/roadmap`, { body: input });
   }
 
-  /** `flag` is the flag UUID or its key. */
-  getFlag(projectId: string, flag: string): Promise<Flag> {
-    return this.request("GET", `/projects/${enc(projectId)}/flags/${enc(flag)}`);
+  updateRoadmapItem(projectId: string, id: string, patch: UpdateRoadmapInput): Promise<RoadmapItem> {
+    return this.request("PATCH", `/projects/${enc(projectId)}/roadmap/${enc(id)}`, { body: patch });
   }
 
-  updateFlag(projectId: string, flag: string, patch: UpdateFlagInput): Promise<Flag> {
-    return this.request("PATCH", `/projects/${enc(projectId)}/flags/${enc(flag)}`, { body: patch });
+  deleteRoadmapItem(projectId: string, id: string): Promise<void> {
+    return this.request("DELETE", `/projects/${enc(projectId)}/roadmap/${enc(id)}`);
   }
 
-  setFlagState(projectId: string, flag: string, envKey: string, patch: StatePatch): Promise<Flag> {
-    return this.request("PUT", `/projects/${enc(projectId)}/flags/${enc(flag)}/states/${enc(envKey)}`, {
-      body: patch,
-    });
+  // --- Changelog --------------------------------------------------------- //
+
+  listChangelog(projectId: string, params: { include_drafts?: boolean } = {}): Promise<{ items: ChangelogEntry[] }> {
+    return this.request("GET", `/projects/${enc(projectId)}/changelog`, { query: params });
   }
 
-  deleteFlag(projectId: string, flag: string): Promise<void> {
-    return this.request("DELETE", `/projects/${enc(projectId)}/flags/${enc(flag)}`);
+  createChangelogEntry(projectId: string, input: CreateChangelogInput): Promise<ChangelogEntry> {
+    return this.request("POST", `/projects/${enc(projectId)}/changelog`, { body: input });
   }
 
-  copyFlags(projectId: string, input: CopyFlagsInput): Promise<CopyResult> {
-    return this.request("POST", `/projects/${enc(projectId)}/flags/copy`, { body: input });
+  updateChangelogEntry(projectId: string, id: string, patch: UpdateChangelogInput): Promise<ChangelogEntry> {
+    return this.request("PATCH", `/projects/${enc(projectId)}/changelog/${enc(id)}`, { body: patch });
   }
 
-  /** Unmetered preview of what the evaluation API would answer. */
-  evaluateFlags(projectId: string, environment: string, distinctId?: string): Promise<Evaluation> {
-    return this.request("GET", `/projects/${enc(projectId)}/flags/evaluate`, {
-      query: { environment, distinct_id: distinctId },
-    });
+  deleteChangelogEntry(projectId: string, id: string): Promise<void> {
+    return this.request("DELETE", `/projects/${enc(projectId)}/changelog/${enc(id)}`);
   }
 
   // --- Account ----------------------------------------------------------- //

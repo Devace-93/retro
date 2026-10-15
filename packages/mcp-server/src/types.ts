@@ -6,57 +6,125 @@ export type Scope =
   | "projects:read"
   | "projects:write"
   | "projects:delete"
-  | "flags:read"
-  | "flags:write"
-  | "flags:delete"
+  | "feedback:read"
+  | "feedback:write"
+  | "feedback:delete"
+  | "board:read"
+  | "board:write"
+  | "board:delete"
   | "usage:read"
   | "audit:read";
 
-export type FlagKind = "boolean" | "string" | "number" | "json";
-
-export interface Environment {
-  id: string;
-  key: string;
-  name: string;
-  client_key_prefix: string;
-  /** Only present on create / rotate. */
-  client_key?: string;
-  position: number;
-  created_at: string;
-}
+export type FeedbackType = "bug" | "feedback" | "feature";
+export type Sentiment = "positive" | "negative" | "neutral";
+export type FeedbackStatus = "new" | "triaged" | "planned" | "in_progress" | "done" | "declined";
+export type Priority = "none" | "low" | "medium" | "high";
+export type Source = "api" | "widget" | "board";
+export type RoadmapStatus = "planned" | "in_progress" | "done";
 
 export interface Project {
   id: string;
   key: string;
   name: string;
   description?: string | null;
-  flag_count: number;
-  /** Present on GET /projects/:id, POST /projects and in the list. */
-  environments?: Environment[];
+  url?: string | null;
+  /** Always present for the owner (the public key is not a secret). */
+  public_key: string;
+  public_key_prefix: string;
+  board_slug: string;
+  board_enabled: boolean;
+  board_url: string | null;
+  board_title?: string | null;
+  board_intro?: string | null;
+  allow_votes: boolean;
+  allow_board_submissions: boolean;
+  types_enabled: FeedbackType[];
+  allow_screenshots: boolean;
+  allow_email: boolean;
+  widget_accent?: string | null;
+  counts: { feedback: number; new: number; roadmap: number };
   created_at: string;
   updated_at: string;
 }
 
-export interface FlagState {
-  enabled: boolean;
-  value: unknown;
-  rollout_percent: number;
-  updated_at?: string;
+export interface Note {
+  id: string;
+  body: string;
+  author: { id: string; email: string } | null;
+  created_at: string;
 }
 
-export interface Flag {
+export interface Screenshot {
+  content_type: string;
+  size: number;
+  width?: number | null;
+  height?: number | null;
+}
+
+export interface FeedbackItem {
   id: string;
   project_id: string;
-  key: string;
-  name: string | null;
-  description?: string | null;
-  kind: FlagKind;
-  default_value: unknown;
+  number: number;
+  type: FeedbackType;
+  sentiment: Sentiment | null;
+  title: string;
+  message: string;
+  status: FeedbackStatus;
+  priority: Priority;
   tags: string[];
-  archived: boolean;
-  states: Record<string, FlagState>;
+  reporter_email: string | null;
+  reporter_id: string | null;
+  page_url: string | null;
+  app_version: string | null;
+  locale: string | null;
+  user_agent: string | null;
+  metadata: Record<string, unknown>;
+  source: Source;
+  has_screenshot: boolean;
+  screenshot?: Screenshot | null;
+  roadmap_item_id: string | null;
+  /** Only on GET /feedback/:item. */
+  notes?: Note[];
   created_at: string;
   updated_at: string;
+}
+
+export interface RoadmapItem {
+  id: string;
+  project_id: string;
+  title: string;
+  description: string | null;
+  status: RoadmapStatus;
+  position: number;
+  public: boolean;
+  votes: number;
+  feedback_count: number;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChangelogEntry {
+  id: string;
+  project_id: string;
+  title: string;
+  body: string;
+  version: string | null;
+  published_at: string | null;
+  roadmap_item_ids: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Summary {
+  project_id: string;
+  total: number;
+  by_status: Record<string, number>;
+  by_type: Record<string, number>;
+  by_sentiment: Record<string, number>;
+  last_7_days: number;
+  last_30_days: number;
+  top_tags: { tag: string; count: number }[];
 }
 
 export interface Paginated<T> {
@@ -75,7 +143,8 @@ export interface KeyInfo {
 export interface Usage {
   period_start: string;
   period_end: string;
-  evaluations: number;
+  feedback: number;
+  attachment_bytes: number;
   counts: { projects: number; api_keys: number };
   limits: Record<string, unknown>;
 }
@@ -93,93 +162,94 @@ export interface AuditEvent {
   meta: Record<string, unknown>;
 }
 
-export interface EvaluatedFlag {
-  kind: FlagKind;
-  enabled: boolean;
-  value: unknown;
-}
-
-export interface Evaluation {
-  project: { id: string; key: string };
-  environment: { id: string; key: string };
-  distinct_id?: string | null;
-  evaluated_at: string;
-  flags: Record<string, EvaluatedFlag>;
-}
-
-export interface CopyResult {
-  target_project_id: string;
-  copied: string[];
-  overwritten: string[];
-  skipped: string[];
-}
-
-export interface ProjectExport {
-  format: string;
-  exported_at: string;
-  project: { key: string; name: string; description?: string | null };
-  environments: { key: string; name: string; position: number }[];
-  flags: {
-    key: string;
-    name: string | null;
-    description?: string | null;
-    kind: FlagKind;
-    default_value: unknown;
-    tags: string[];
-    archived: boolean;
-    states: Record<string, { enabled: boolean; value: unknown; rollout_percent: number }>;
-  }[];
-}
-
 export interface RotatedKey {
-  client_key: string;
-  client_key_prefix: string;
-}
-
-export interface StatePatch {
-  enabled?: boolean;
-  value?: unknown;
-  rollout_percent?: number;
+  public_key: string;
+  public_key_prefix: string;
 }
 
 export interface CreateProjectInput {
   name: string;
   key?: string;
   description?: string;
+  url?: string;
 }
 
 export interface UpdateProjectInput {
   name?: string;
   description?: string;
+  url?: string;
+  board_slug?: string;
+  board_enabled?: boolean;
+  board_title?: string;
+  board_intro?: string;
+  allow_votes?: boolean;
+  allow_board_submissions?: boolean;
+  types_enabled?: FeedbackType[];
+  allow_screenshots?: boolean;
+  allow_email?: boolean;
+  widget_accent?: string;
 }
 
-export interface CreateEnvironmentInput {
-  key: string;
-  name?: string;
+export interface ListFeedbackParams {
+  q?: string;
+  type?: string;
+  status?: string;
+  sentiment?: Sentiment;
+  priority?: Priority;
+  tag?: string;
+  has_screenshot?: boolean;
+  since?: string;
+  page?: number;
+  per_page?: number;
+  sort?: "newest" | "oldest" | "votes";
 }
 
-export interface CreateFlagInput {
-  key: string;
-  name?: string;
-  description?: string;
-  kind?: FlagKind;
-  default_value?: unknown;
+export interface UpdateFeedbackInput {
+  status?: FeedbackStatus;
+  priority?: Priority;
   tags?: string[];
-  states?: Record<string, StatePatch>;
+  title?: string;
+  type?: FeedbackType;
+  sentiment?: Sentiment | null;
+  roadmap_item_id?: string | null;
 }
 
-export interface UpdateFlagInput {
-  name?: string;
+export interface PromoteInput {
+  title?: string;
   description?: string;
-  kind?: FlagKind;
-  default_value?: unknown;
-  tags?: string[];
-  archived?: boolean;
+  status?: RoadmapStatus;
 }
 
-export interface CopyFlagsInput {
-  target_project_id: string;
-  flag_keys?: string[];
-  include_states?: boolean;
-  on_conflict?: "skip" | "overwrite";
+export interface PromoteResult {
+  item: FeedbackItem;
+  roadmap_item: RoadmapItem;
+}
+
+export interface CreateRoadmapInput {
+  title: string;
+  description?: string;
+  status?: RoadmapStatus;
+  public?: boolean;
+}
+
+export interface UpdateRoadmapInput {
+  title?: string;
+  description?: string;
+  status?: RoadmapStatus;
+  public?: boolean;
+}
+
+export interface CreateChangelogInput {
+  title: string;
+  body: string;
+  version?: string;
+  publish?: boolean;
+}
+
+export interface UpdateChangelogInput {
+  title?: string;
+  body?: string;
+  version?: string;
+  published?: boolean;
+  roadmap_item_ids?: string[];
 }
