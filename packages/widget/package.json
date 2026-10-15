@@ -1,0 +1,17 @@
+{
+  "name": "@retro/widget",
+  "version": "0.1.0",
+  "private": true,
+  "description": "retro drop-in feedback widget: one script tag, zero dependencies, served at /widget.js",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "build": "bun run build.ts",
+    "test": "bun test",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "5.9.3"
+  }
+}

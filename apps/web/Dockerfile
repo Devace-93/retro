@@ -16,6 +16,13 @@ WORKDIR /repo
 COPY packages/shared ./packages/shared
 COPY apps/web ./apps/web
 
+# Drop-in widget: bundled into apps/web/public so the web service serves it at
+# /widget.js and /widget/v1.js (static files, see CONTRACT.md → Widget contract).
+COPY packages/widget ./packages/widget
+WORKDIR /repo/packages/widget
+RUN bun install --frozen-lockfile || bun install
+RUN bun run build
+
 WORKDIR /repo/apps/web
 RUN bun install --frozen-lockfile || bun install
 

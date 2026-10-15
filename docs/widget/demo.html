@@ -1,0 +1,48 @@
+<!doctype html>
+<!--
+  Host-page demo for the retro widget. Open it from a static server (e.g.
+  `bunx serve docs/widget`) while the local stack runs on :8082, and replace
+  the project key with one from your dashboard. The e2e suite serves an
+  equivalent page from a fake third-party origin (e2e/tests/widget.spec.ts).
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>retro widget demo</title>
+    <style>
+      body { font: 16px/1.5 system-ui, sans-serif; margin: 0; padding: 3rem; background: #f8fafc; color: #0f172a; }
+      main { max-width: 42rem; margin: 0 auto; }
+      button { font: inherit; padding: 0.5rem 1rem; border-radius: 0.5rem; border: 1px solid #cbd5e1; background: #fff; cursor: pointer; }
+      code { background: #e2e8f0; padding: 0.1em 0.3em; border-radius: 0.25rem; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>A host app</h1>
+      <p>The floating button in the corner is the retro widget. It also has a headless API:</p>
+      <p>
+        <button onclick="retro.open({ type: 'bug' })">Report a bug</button>
+        <button onclick="retro.open({ type: 'feature' })">Suggest a feature</button>
+        <button onclick="retro.setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark')">Toggle theme</button>
+      </p>
+      <p>Swap <code>data-project-key</code> below for your project's public key.</p>
+    </main>
+
+    <script
+      src="http://localhost:8082/widget.js"
+      data-project-key="retro_pub_REPLACE_ME"
+      data-api="http://localhost:8082/api"
+      data-position="bottom-right"
+      defer
+    ></script>
+    <script>
+      window.addEventListener("load", () => {
+        retro.identify({ id: "demo-user", email: "demo@example.com" });
+        retro.setMeta({ build: "demo" });
+        retro.on("submitted", (ev) => console.log("retro: submitted", ev));
+        retro.on("error", (err) => console.warn("retro: error", err));
+      });
+    </script>
+  </body>
+</html>
