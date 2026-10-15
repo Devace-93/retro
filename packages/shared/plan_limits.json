@@ -1,15 +1,15 @@
 {
-  "_comment": "Single source of truth for plan limits. -1 means unlimited. Consumed by the Python backend (dbcore/plans.py) and the Qwik frontend (apps/web). Counts (projects, environments_per_project, flags_per_project, api_keys) are hard limits: creating past them returns 402 limit_reached. evaluations_per_month is a SOFT limit: the evaluation API keeps answering past it (never break a running app); the overage is reported in the dashboard and a PostHog event fires once per period.",
+  "_comment": "Single source of truth for plan limits. -1 means unlimited. Consumed by the Python backend (dbcore/plans.py) and the Qwik frontend (apps/web). Counts (projects, api_keys, roadmap_items_per_project) are hard limits: creating past them returns 402 limit_reached. feedback_per_month is a SOFT limit: the ingest API keeps accepting past it (never lose a user's feedback); the overage is reported in the dashboard and a PostHog event fires once per period. attachment_storage_mb caps screenshots per account: past it the feedback is stored WITHOUT the screenshot and the response carries screenshot_dropped=true.",
   "plans": {
     "free": {
       "label": "Free",
       "price_monthly": 0,
       "price_annual": 0,
       "projects": 3,
-      "environments_per_project": 3,
-      "flags_per_project": 25,
-      "evaluations_per_month": 100000,
       "api_keys": 5,
+      "feedback_per_month": 500,
+      "attachment_storage_mb": 100,
+      "roadmap_items_per_project": 50,
       "audit_retention_days": 7,
       "max_users": 1,
       "api": "basic"
@@ -19,10 +19,10 @@
       "price_monthly": 12,
       "price_annual": 115,
       "projects": 20,
-      "environments_per_project": 10,
-      "flags_per_project": 200,
-      "evaluations_per_month": 2000000,
       "api_keys": 20,
+      "feedback_per_month": 10000,
+      "attachment_storage_mb": 2048,
+      "roadmap_items_per_project": 500,
       "audit_retention_days": 365,
       "max_users": 2,
       "api": "full"
@@ -32,10 +32,10 @@
       "price_monthly": 49,
       "price_annual": 470,
       "projects": 100,
-      "environments_per_project": 20,
-      "flags_per_project": 1000,
-      "evaluations_per_month": 20000000,
       "api_keys": 100,
+      "feedback_per_month": 100000,
+      "attachment_storage_mb": 20480,
+      "roadmap_items_per_project": -1,
       "audit_retention_days": 730,
       "max_users": 20,
       "api": "full"
@@ -45,10 +45,10 @@
       "price_monthly": -1,
       "price_annual": -1,
       "projects": -1,
-      "environments_per_project": -1,
-      "flags_per_project": -1,
-      "evaluations_per_month": -1,
       "api_keys": -1,
+      "feedback_per_month": -1,
+      "attachment_storage_mb": -1,
+      "roadmap_items_per_project": -1,
       "audit_retention_days": -1,
       "max_users": -1,
       "api": "full"
@@ -58,10 +58,10 @@
       "price_monthly": 0,
       "price_annual": 0,
       "projects": -1,
-      "environments_per_project": -1,
-      "flags_per_project": -1,
-      "evaluations_per_month": -1,
       "api_keys": -1,
+      "feedback_per_month": -1,
+      "attachment_storage_mb": -1,
+      "roadmap_items_per_project": -1,
       "audit_retention_days": -1,
       "max_users": -1,
       "api": "full"
@@ -71,5 +71,8 @@
     "team": "team",
     "pro": "pro"
   },
-  "entitlement_priority": ["team", "pro"]
+  "entitlement_priority": [
+    "team",
+    "pro"
+  ]
 }

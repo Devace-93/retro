@@ -1,31 +1,34 @@
 {
-  "_comment": "Single source of truth for API-key roles and the scopes they grant. Consumed by the Python API (dbcore/rbac.py enforces scopes per endpoint), the Qwik dashboard (role picker on /dashboard/settings) and the MCP server (filters which tools a key can see and call). Keep roles additive: each role is a superset of the previous one. Environment client keys (retro_pub_*) are NOT API keys: they can only call the evaluation endpoints and carry no role.",
+  "_comment": "Single source of truth for API-key roles and the scopes they grant. Consumed by the Python API (dbcore/rbac.py enforces scopes per endpoint), the Qwik dashboard (role picker on /dashboard/settings) and the MCP server (filters which tools a key can see and call). Keep roles additive: each role is a superset of the previous one. Project public keys (retro_pub_*) are NOT API keys: they can only call the ingest endpoints and carry no role.",
   "default_role": "editor",
   "scopes": {
-    "projects:read": "List and read projects and their environments.",
-    "projects:write": "Create and update projects and environments, rotate environment keys.",
-    "projects:delete": "Delete projects and environments (destructive).",
-    "flags:read": "List and read flags, their per-environment states, export a project, preview evaluations.",
-    "flags:write": "Create and update flags, change per-environment states, copy flags between projects.",
-    "flags:delete": "Delete flags (destructive).",
+    "projects:read": "List and read projects and their settings.",
+    "projects:write": "Create and update projects, rotate the public key, change board settings.",
+    "projects:delete": "Delete projects (destructive).",
+    "feedback:read": "List and read feedback items, notes and screenshots; read summaries.",
+    "feedback:write": "Change status, priority, tags; add notes; promote to the roadmap.",
+    "feedback:delete": "Delete feedback items (destructive).",
+    "board:read": "Read roadmap items and changelog entries (including drafts).",
+    "board:write": "Create, update, reorder and publish roadmap items and changelog entries.",
+    "board:delete": "Delete roadmap items and changelog entries (destructive).",
     "usage:read": "Monthly usage counters and plan limits.",
     "audit:read": "Read the account audit log."
   },
   "roles": {
     "viewer": {
       "label": "Viewer",
-      "description": "Read-only: projects, flags, usage.",
-      "scopes": ["projects:read", "flags:read", "usage:read"]
+      "description": "Read-only: projects, feedback, roadmap, changelog, usage.",
+      "scopes": ["projects:read", "feedback:read", "board:read", "usage:read"]
     },
     "editor": {
       "label": "Editor",
-      "description": "Viewer, plus create and update projects and flags, toggle states, copy flags.",
-      "scopes": ["projects:read", "projects:write", "flags:read", "flags:write", "usage:read"]
+      "description": "Viewer, plus triage feedback, manage the roadmap and changelog, create and update projects.",
+      "scopes": ["projects:read", "projects:write", "feedback:read", "feedback:write", "board:read", "board:write", "usage:read"]
     },
     "admin": {
       "label": "Admin",
-      "description": "Editor, plus delete projects and flags and read the audit log.",
-      "scopes": ["projects:read", "projects:write", "projects:delete", "flags:read", "flags:write", "flags:delete", "usage:read", "audit:read"]
+      "description": "Editor, plus delete projects, feedback and board items, and read the audit log.",
+      "scopes": ["projects:read", "projects:write", "projects:delete", "feedback:read", "feedback:write", "feedback:delete", "board:read", "board:write", "board:delete", "usage:read", "audit:read"]
     }
   }
 }
