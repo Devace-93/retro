@@ -7,6 +7,7 @@ import { ApiError, fetchConfig, submitFeedback, type FeedbackType, type Sentimen
 import { format, isRtl, resolveLang, stringsFor, type Strings } from "./i18n";
 import { canCaptureScreen, captureScreen, fileToDataUrl, imageFromPaste } from "./screenshot";
 import { CSS } from "./styles";
+import { ensureContainer, loadTurnstile, turnstileLanguage, turnstileTheme, type TurnstileApi } from "./turnstile";
 import {
   accentForeground,
   apiFromScriptSrc,
@@ -59,6 +60,13 @@ export class RetroWidget extends HTMLElement {
   private busyShot = false;
   private animateIn = false;
   private bound = false;
+  // Turnstile (Phase 2): loaded only when the project config has a site key.
+  private tsApi: TurnstileApi | null = null;
+  private tsWidgetId: string | null = null;
+  private tsToken: string | null = null;
+  private tsWaiters: Array<(token: string | null) => void> = [];
+  private tsLoading = false;
+  private tsFailed = false;
   private docKey = (e: KeyboardEvent) => this.guard(() => { if (e.key === "Escape" && this.open_) this.close(); });
 
   static get observedAttributes() {
@@ -111,6 +119,7 @@ export class RetroWidget extends HTMLElement {
       }
       this.loadConfig();
       this.render();
+      this.mountTurnstile();
       this.focusFirst();
     });
   }
@@ -220,6 +229,7 @@ export class RetroWidget extends HTMLElement {
       .then((cfg) => {
         this.config = cfg;
         this.applyAccent();
+        if (this.open_) this.mountTurnstile();
         if (this.type && !this.typeEnabled(this.type)) {
           this.type = null;
           this.step = "pick";
@@ -253,6 +263,83 @@ export class RetroWidget extends HTMLElement {
     if (r) return r;
     if (this.config && this.config.board_url && (!this.config.features || this.config.features.public_boards !== false)) return this.config.board_url;
     return null;
+  }
+
+  private turnstileSiteKey(): string | null {
+    const k = this.config && this.config.turnstile_site_key;
+    return typeof k === "string" && k.trim() ? k.trim() : null;
+  }
+
+  /**
+   * Load the Turnstile API and render the challenge into the slotted
+   * light-DOM container. Idempotent; errors never block the form (the API
+   * answers captcha_failed and the user sees a retryable error).
+   */
+  private mountTurnstile() {
+    const siteKey = this.turnstileSiteKey();
+    if (!siteKey || this.tsWidgetId || this.tsLoading || this.tsFailed) return;
+    this.tsLoading = true;
+    loadTurnstile()
+      .then((api) => {
+        this.tsApi = api;
+        const container = ensureContainer(this);
+        this.tsWidgetId = api.render(container, {
+          sitekey: siteKey,
+          theme: turnstileTheme(this.dataset.theme),
+          language: turnstileLanguage(this.locale),
+          appearance: "interaction-only",
+          size: "flexible",
+          callback: (token) => this.guard(() => this.onTurnstileToken(token)),
+          "expired-callback": () => this.guard(() => this.onTurnstileToken(null)),
+          "error-callback": () => this.guard(() => this.onTurnstileToken(null)),
+          "timeout-callback": () => this.guard(() => this.onTurnstileToken(null)),
+        });
+      })
+      .catch((e) => {
+        this.tsFailed = true;
+        this.fail(e);
+      })
+      .then(() => {
+        this.tsLoading = false;
+      });
+  }
+
+  private onTurnstileToken(token: string | null) {
+    this.tsToken = token;
+    const waiters = this.tsWaiters;
+    this.tsWaiters = [];
+    for (const w of waiters) w(token);
+  }
+
+  /** Current token, or wait (bounded) for the challenge to produce one. */
+  private turnstileToken(timeoutMs = 12000): Promise<string | null> {
+    if (!this.turnstileSiteKey()) return Promise.resolve(null);
+    if (this.tsToken) return Promise.resolve(this.tsToken);
+    if (!this.tsWidgetId && !this.tsLoading) this.mountTurnstile();
+    if (this.tsFailed) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.tsWaiters = this.tsWaiters.filter((w) => w !== done);
+        resolve(this.tsToken);
+      }, timeoutMs);
+      const done = (token: string | null) => {
+        clearTimeout(timer);
+        resolve(token);
+      };
+      this.tsWaiters.push(done);
+    });
+  }
+
+  /** A token is single-use: clear it and ask Turnstile for a fresh one. */
+  private resetTurnstile() {
+    this.tsToken = null;
+    if (this.tsApi && this.tsWidgetId) {
+      try {
+        this.tsApi.reset(this.tsWidgetId);
+      } catch (e) {
+        this.fail(e);
+      }
+    }
   }
 
   private reset() {
@@ -348,6 +435,7 @@ export class RetroWidget extends HTMLElement {
       <input class="hp" type="text" name="website" tabindex="-1" autocomplete="off" aria-hidden="true">
       ${shot}
       ${error ? `<p class="err" role="alert">${esc(error)}</p>` : ""}
+      ${this.turnstileSiteKey() ? '<div class="captcha"><slot name="turnstile"></slot></div>' : ""}
       <div class="foot"><button class="btn primary" type="submit" ${sending ? "disabled" : ""}>${esc(sending ? t.sending : t.send)}</button></div>
     </form>`;
   }
@@ -532,6 +620,7 @@ export class RetroWidget extends HTMLElement {
     this.errorText = "";
     this.render();
     try {
+      const turnstileToken = await this.turnstileToken();
       const payload = {
         type: this.type,
         message: msg,
@@ -547,16 +636,20 @@ export class RetroWidget extends HTMLElement {
           ...this.meta,
         },
         screenshot: this.screenshotsAllowed() && this.screenshot ? this.screenshot : undefined,
+        turnstile_token: turnstileToken || undefined,
         website: hp ? hp.value : "",
       };
       this.result = await submitFeedback(this.opts.api, this.opts.projectKey, payload);
       this.step = "done";
+      this.resetTurnstile();
       this.render();
       this.emit("submitted", { id: this.result.id, number: this.result.number });
       this.focusFirst();
     } catch (e) {
       this.step = "error";
-      this.errorText = e instanceof ApiError && e.code === "screenshot_too_large" ? this.t.screenshotError : this.t.error;
+      const code = e instanceof ApiError ? e.code : "";
+      this.errorText = code === "screenshot_too_large" ? this.t.screenshotError : code === "captcha_failed" ? this.t.captchaError : this.t.error;
+      if (code === "captcha_failed") this.resetTurnstile();
       this.render();
       this.fail(e);
     }

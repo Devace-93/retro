@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { baseOf, format, isRtl, LOCALES, resolveLang, stringsFor } from "../src/i18n";
 import { dataUrlBytes, fitWithin } from "../src/screenshot";
 import { accentForeground, apiFromScriptSrc, isHexColor, parseOptions, resolveTheme, type AttrSource } from "../src/theme";
+import { CONTAINER_ATTR, turnstileLanguage, turnstileTheme } from "../src/turnstile";
 
 const attrs = (map: Record<string, string>): AttrSource => ({ get: (n) => (n in map ? map[n] : null), has: (n) => n in map });
 
@@ -13,6 +14,10 @@ describe("i18n", () => {
       const s = stringsFor(l);
       for (const k of Object.keys(en)) expect(typeof (s as any)[k]).toBe("string");
     }
+  });
+  test("captcha error string exists in every catalog", () => {
+    for (const l of LOCALES) expect(stringsFor(l).captchaError.length).toBeGreaterThan(5);
+    expect(stringsFor("es-MX").captchaError).not.toBe(stringsFor("en-US").captchaError);
   });
   test("falls back to English for unknown languages", () => {
     expect(stringsFor("xx-YY").send).toBe("Send");
@@ -86,5 +91,22 @@ describe("screenshot math", () => {
     const b64 = Buffer.from(bytes).toString("base64");
     expect(dataUrlBytes(`data:image/png;base64,${b64}`)).toBe(1000);
     expect(dataUrlBytes("nope")).toBe(0);
+  });
+});
+
+describe("turnstile helpers", () => {
+  test("theme maps to what Turnstile understands", () => {
+    expect(turnstileTheme("dark")).toBe("dark");
+    expect(turnstileTheme("light")).toBe("light");
+    expect(turnstileTheme(undefined)).toBe("auto");
+    expect(turnstileTheme("weird")).toBe("auto");
+  });
+  test("language keeps the base tag", () => {
+    expect(turnstileLanguage("es-MX")).toBe("es");
+    expect(turnstileLanguage("PT_BR")).toBe("pt");
+    expect(turnstileLanguage("")).toBe("auto");
+  });
+  test("container attribute is stable (hosts may style it)", () => {
+    expect(CONTAINER_ATTR).toBe("data-retro-turnstile");
   });
 });

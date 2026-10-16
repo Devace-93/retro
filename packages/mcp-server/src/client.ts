@@ -10,22 +10,31 @@ import type {
   CreateChangelogInput,
   CreateProjectInput,
   CreateRoadmapInput,
+  CreateWebhookInput,
+  ExportFormat,
   FeedbackItem,
   KeyInfo,
   ListFeedbackParams,
   Note,
+  NotificationSettings,
   Paginated,
   Project,
+  ProjectExport,
   PromoteInput,
   PromoteResult,
   RoadmapItem,
   RotatedKey,
+  SavedView,
+  SavedViewFilters,
   Summary,
   UpdateChangelogInput,
   UpdateFeedbackInput,
+  UpdateNotificationSettingsInput,
   UpdateProjectInput,
   UpdateRoadmapInput,
   Usage,
+  Webhook,
+  WebhookDelivery,
 } from "./types.js";
 import { VERSION } from "./version.js";
 
@@ -68,7 +77,7 @@ export class RetroClient {
   private async request<T>(
     method: string,
     path: string,
-    opts: { query?: Query; body?: unknown } = {},
+    opts: { query?: Query; body?: unknown; raw?: boolean } = {},
   ): Promise<T> {
     const url = new URL(this.baseUrl + path);
     for (const [k, v] of Object.entries(opts.query ?? {})) {
@@ -89,6 +98,7 @@ export class RetroClient {
 
     if (res.status === 204) return undefined as T;
     const text = await res.text();
+    if (opts.raw && res.ok) return text as T;
     let data: unknown = null;
     try {
       data = text ? JSON.parse(text) : null;
@@ -218,6 +228,54 @@ export class RetroClient {
 
   deleteChangelogEntry(projectId: string, id: string): Promise<void> {
     return this.request("DELETE", `/projects/${enc(projectId)}/changelog/${enc(id)}`);
+  }
+
+  // --- Phase 2: export, replies, merge, views, webhooks -------------------- //
+
+  exportProject(projectId: string, format: "json"): Promise<ProjectExport>;
+  exportProject(projectId: string, format: "csv"): Promise<string>;
+  exportProject(projectId: string, format: ExportFormat): Promise<ProjectExport | string> {
+    return this.request("GET", `/projects/${enc(projectId)}/export`, { query: { format }, raw: format === "csv" });
+  }
+
+  reply(projectId: string, item: string | number, body: string): Promise<Note> {
+    return this.request("POST", `/projects/${enc(projectId)}/feedback/${enc(String(item))}/reply`, { body: { body } });
+  }
+
+  merge(projectId: string, item: string | number, into: string): Promise<FeedbackItem> {
+    return this.request("POST", `/projects/${enc(projectId)}/feedback/${enc(String(item))}/merge`, { body: { into } });
+  }
+
+  listViews(projectId: string): Promise<SavedView[]> {
+    return this.request("GET", `/projects/${enc(projectId)}/views`);
+  }
+
+  createView(projectId: string, input: { name: string; filters: SavedViewFilters }): Promise<SavedView> {
+    return this.request("POST", `/projects/${enc(projectId)}/views`, { body: input });
+  }
+
+  listWebhooks(projectId: string): Promise<Webhook[]> {
+    return this.request("GET", `/projects/${enc(projectId)}/webhooks`);
+  }
+
+  createWebhook(projectId: string, input: CreateWebhookInput): Promise<Webhook> {
+    return this.request("POST", `/projects/${enc(projectId)}/webhooks`, { body: input });
+  }
+
+  testWebhook(projectId: string, webhookId: string): Promise<{ delivery_id: string }> {
+    return this.request("POST", `/projects/${enc(projectId)}/webhooks/${enc(webhookId)}/test`);
+  }
+
+  listDeliveries(projectId: string, webhookId: string, params: { limit?: number } = {}): Promise<WebhookDelivery[]> {
+    return this.request("GET", `/projects/${enc(projectId)}/webhooks/${enc(webhookId)}/deliveries`, { query: params });
+  }
+
+  notificationSettings(): Promise<NotificationSettings> {
+    return this.request("GET", "/account/notifications");
+  }
+
+  updateNotificationSettings(patch: UpdateNotificationSettingsInput): Promise<NotificationSettings> {
+    return this.request("PATCH", "/account/notifications", { body: patch });
   }
 
   // --- Account ----------------------------------------------------------- //

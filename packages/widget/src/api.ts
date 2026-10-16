@@ -9,6 +9,8 @@ export interface WidgetConfig {
   allow_email: boolean;
   accent?: string | null;
   board_url?: string | null;
+  /** Cloudflare Turnstile site key when the project enables it (Phase 2). */
+  turnstile_site_key?: string | null;
   features?: { screenshots?: boolean; public_boards?: boolean };
 }
 
@@ -24,6 +26,8 @@ export interface SubmitPayload {
   locale?: string;
   metadata?: Record<string, unknown>;
   screenshot?: string;
+  /** Turnstile response token, required when the project enables Turnstile. */
+  turnstile_token?: string;
   website: string; // honeypot, always ""
 }
 

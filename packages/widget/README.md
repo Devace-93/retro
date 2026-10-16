@@ -79,6 +79,22 @@ defaults.
 - The control is hidden when the project disables screenshots or the
   `screenshots` feature is off.
 
+## Spam protection (Cloudflare Turnstile)
+
+When a project has a Turnstile site key (project settings → spam protection),
+the widget loads `https://challenges.cloudflare.com/turnstile/v0/api.js`
+lazily, the first time the panel opens, and renders a managed,
+interaction-only challenge above the **Send** button. The token is sent as
+`turnstile_token`; the API verifies it server-side. A `captcha_failed` answer
+shows a retryable error and resets the challenge. Projects without a site key
+never contact Cloudflare.
+
+Limitation: Turnstile cannot render inside a shadow root, so the widget keeps
+one light-DOM child on the host element, `<div slot="turnstile"
+data-retro-turnstile>`, and slots it into the form. Do not remove that element;
+you may style it with `retro-widget > [data-retro-turnstile]`. The challenge
+is rendered once per page load and reset after every submission.
+
 ## Content Security Policy
 
 If your site sets a CSP, allow:
@@ -87,6 +103,13 @@ If your site sets a CSP, allow:
 script-src  https://retro.3m4.net;
 connect-src https://retro.3m4.net;
 img-src     data: blob:;   /* screenshot preview */
+```
+
+With Turnstile enabled, also allow:
+
+```
+script-src  https://challenges.cloudflare.com;
+frame-src   https://challenges.cloudflare.com;
 ```
 
 ## Browser support

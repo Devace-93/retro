@@ -56,6 +56,8 @@ input[type=email]{display:block;width:100%;margin-top:8px;padding:9px 12px;borde
 .btn.ghost{color:var(--muted)}
 .btn.ghost:hover{background:var(--soft);color:var(--fg)}
 .err{margin:10px 0 0;color:var(--danger);font-size:13px}
+.captcha{margin-top:10px;min-height:0}
+::slotted([data-retro-turnstile]){display:block}
 .done{text-align:center;padding:14px 4px 6px}
 .done .big{font-size:40px;line-height:1;margin-bottom:10px}
 .done p{margin:6px 0}
