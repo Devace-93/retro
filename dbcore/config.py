@@ -56,5 +56,21 @@ class Config:
     # attachments (screenshots)
     max_screenshot_bytes: int = int(os.getenv("MAX_SCREENSHOT_BYTES", str(1_500_000)))
 
+    # outbound mail (Phase 2). Disabled => every mail is logged and skipped.
+    mail_enabled: bool = _bool("MAIL_ENABLED", False)
+    smtp_url: str = os.getenv("SMTP_URL", "")
+    mail_from: str = os.getenv("MAIL_FROM", "retro <no-reply@3m4.net>")
+
+    # webhooks (Phase 2)
+    webhook_timeout_seconds: float = float(os.getenv("WEBHOOK_TIMEOUT_SECONDS", "10"))
+
+    # Cloudflare Turnstile verification endpoint (Phase 2; per-project keys)
+    turnstile_verify_url: str = os.getenv(
+        "TURNSTILE_VERIFY_URL", "https://challenges.cloudflare.com/turnstile/v0/siteverify"
+    )
+
+    # outbox worker (Phase 2)
+    worker_poll_seconds: float = float(os.getenv("WORKER_POLL_SECONDS", "10"))
+
 
 config = Config()

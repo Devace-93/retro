@@ -42,6 +42,18 @@
       "description": "Paywall, checkout and /billing/offerings. The RevenueCat webhook is NEVER gated.",
       "default": true,
       "created": "2026-10-15"
+    },
+    "webhooks": {
+      "description": "Outgoing webhooks: creating/testing endpoints and emitting events to them. OFF = no deliveries are queued (existing endpoints are kept).",
+      "default": true,
+      "self_host": true,
+      "created": "2026-10-15"
+    },
+    "mail": {
+      "description": "Outbound email: new-feedback digests and replies to reporters. OFF = replies answer 503 and no digests are queued. MAIL_ENABLED/SMTP_URL must also be configured.",
+      "default": true,
+      "self_host": true,
+      "created": "2026-10-15"
     }
   }
 }

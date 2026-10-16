@@ -1,5 +1,5 @@
 {
-  "_comment": "Single source of truth for plan limits. -1 means unlimited. Consumed by the Python backend (dbcore/plans.py) and the Qwik frontend (apps/web). Counts (projects, api_keys, roadmap_items_per_project) are hard limits: creating past them returns 402 limit_reached. feedback_per_month is a SOFT limit: the ingest API keeps accepting past it (never lose a user's feedback); the overage is reported in the dashboard and a PostHog event fires once per period. attachment_storage_mb caps screenshots per account: past it the feedback is stored WITHOUT the screenshot and the response carries screenshot_dropped=true.",
+  "_comment": "Single source of truth for plan limits. -1 means unlimited. Consumed by the Python backend (dbcore/plans.py) and the Qwik frontend (apps/web). Counts (projects, api_keys, roadmap_items_per_project) are hard limits: creating past them returns 402 limit_reached. feedback_per_month is a SOFT limit: the ingest API keeps accepting past it (never lose a user's feedback); the overage is reported in the dashboard and a PostHog event fires once per period. attachment_storage_mb caps screenshots per account: past it the feedback is stored WITHOUT the screenshot and the response carries screenshot_dropped=true. webhooks_per_project is a hard limit (402, which: webhooks).",
   "plans": {
     "free": {
       "label": "Free",
@@ -10,6 +10,7 @@
       "feedback_per_month": 500,
       "attachment_storage_mb": 100,
       "roadmap_items_per_project": 50,
+      "webhooks_per_project": 2,
       "audit_retention_days": 7,
       "max_users": 1,
       "api": "basic"
@@ -23,6 +24,7 @@
       "feedback_per_month": 10000,
       "attachment_storage_mb": 2048,
       "roadmap_items_per_project": 500,
+      "webhooks_per_project": 5,
       "audit_retention_days": 365,
       "max_users": 2,
       "api": "full"
@@ -36,6 +38,7 @@
       "feedback_per_month": 100000,
       "attachment_storage_mb": 20480,
       "roadmap_items_per_project": -1,
+      "webhooks_per_project": 20,
       "audit_retention_days": 730,
       "max_users": 20,
       "api": "full"
@@ -49,6 +52,7 @@
       "feedback_per_month": -1,
       "attachment_storage_mb": -1,
       "roadmap_items_per_project": -1,
+      "webhooks_per_project": -1,
       "audit_retention_days": -1,
       "max_users": -1,
       "api": "full"
@@ -62,6 +66,7 @@
       "feedback_per_month": -1,
       "attachment_storage_mb": -1,
       "roadmap_items_per_project": -1,
+      "webhooks_per_project": -1,
       "audit_retention_days": -1,
       "max_users": -1,
       "api": "full"

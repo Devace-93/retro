@@ -2,9 +2,11 @@
 
 Tenancy: an Account is the billing entity. Users join accounts via Memberships.
 Product hierarchy: Account -> Project -> FeedbackItem (+ FeedbackNote, one
-Attachment), RoadmapItem (+ RoadmapVote), ChangelogEntry. Deleting a project
-cascades everything under it (Postgres ``ON DELETE CASCADE``), so the API never
-has to clean up by hand.
+Attachment), RoadmapItem (+ RoadmapVote), ChangelogEntry, Webhook
+(+ WebhookDelivery), SavedView. Deleting a project cascades everything under it
+(Postgres ``ON DELETE CASCADE``), so the API never has to clean up by hand.
+Side effects (mail, webhook calls) go through the ``Outbox`` table and are
+delivered by ``dbcore.worker``.
 
 Secrets (API keys, refresh tokens) are stored as sha256 hashes plus a short
 non-sensitive prefix; the plaintext is shown once. A project's *public key*
@@ -55,6 +57,10 @@ class Account(Base):
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     # current effective plan: free | pro | team | enterprise | selfhost
     plan: Mapped[str] = mapped_column(String(20), nullable=False, default="free")
+    # Notification settings (Phase 2). Digest cadence in minutes: 0 = one mail
+    # per item, otherwise one mail per (account, project) at most that often.
+    email_new_feedback: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    email_digest_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=60, server_default="60")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     memberships: Mapped[list["Membership"]] = relationship(back_populates="account")
@@ -166,6 +172,11 @@ class Project(Base):
     allow_email: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     widget_accent: Mapped[str | None] = mapped_column(String(9))  # "#rrggbb"
 
+    # Cloudflare Turnstile (Phase 2, optional). The site key is public (the
+    # widget renders it); the secret is write-only through the API.
+    turnstile_site_key: Mapped[str | None] = mapped_column(String(120))
+    turnstile_secret: Mapped[str | None] = mapped_column(String(120))
+
     # Last per-project feedback number handed out (see dbcore.feedback.next_number).
     last_feedback_number: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
 
@@ -183,6 +194,13 @@ class Project(Base):
     )
     changelog_entries: Mapped[list["ChangelogEntry"]] = relationship(
         back_populates="project", cascade="all, delete-orphan", passive_deletes=True
+    )
+    webhooks: Mapped[list["Webhook"]] = relationship(
+        back_populates="project", cascade="all, delete-orphan", passive_deletes=True
+    )
+    saved_views: Mapped[list["SavedView"]] = relationship(
+        back_populates="project", cascade="all, delete-orphan", passive_deletes=True,
+        order_by="SavedView.position",
     )
 
 
@@ -273,6 +291,14 @@ class FeedbackItem(Base):
     roadmap_item_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("roadmap_items.id", ondelete="SET NULL"), index=True
     )
+    # Duplicate detection (Phase 2): top matches computed at ingest time
+    # (``[{id, number, similarity}]``) and the item this one was merged into.
+    similar_ids: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    duplicate_of: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("feedback_items.id", ondelete="SET NULL"), index=True
+    )
+    # Extra reporter emails collected by merges, so a reply reaches everyone.
+    watchers: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -302,6 +328,11 @@ class FeedbackNote(Base):
     # API-key authors have no user; keep a label (key prefix) for display.
     author_label: Mapped[str | None] = mapped_column(String(120))
     body: Mapped[str] = mapped_column(Text, nullable=False)
+    # note (internal) | reply (mailed to the reporter). Replies carry the
+    # delivery state of their outbox job: pending | sent | failed | skipped.
+    kind: Mapped[str] = mapped_column(String(10), nullable=False, default="note", server_default="note")
+    delivery: Mapped[str | None] = mapped_column(String(10))
+    outbox_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     item: Mapped[FeedbackItem] = relationship(back_populates="notes")
@@ -357,6 +388,111 @@ class ChangelogEntry(Base):
     )
 
     project: Mapped[Project] = relationship(back_populates="changelog_entries")
+
+
+# --------------------------------------------------------------------------- #
+# Phase 2: webhooks, saved views, outbox
+# --------------------------------------------------------------------------- #
+class Webhook(Base):
+    """A per-project HTTPS endpoint that receives signed event payloads.
+
+    The signing secret is kept in plaintext because the worker needs it to
+    compute the HMAC; it is returned to the caller exactly once (creation).
+    """
+
+    __tablename__ = "webhooks"
+
+    id: Mapped[uuid.UUID] = _pk()
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    events: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    description: Mapped[str | None] = mapped_column(String(200))
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    secret: Mapped[str] = mapped_column(String(80), nullable=False)
+    secret_prefix: Mapped[str] = mapped_column(String(16), nullable=False)
+    last_delivery_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_status: Mapped[str | None] = mapped_column(String(10))  # delivered | failed
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    project: Mapped[Project] = relationship(back_populates="webhooks")
+    deliveries: Mapped[list["WebhookDelivery"]] = relationship(
+        back_populates="webhook", cascade="all, delete-orphan", passive_deletes=True
+    )
+
+
+class WebhookDelivery(Base):
+    """One event sent to one webhook. The outbox job referenced by
+    ``outbox_id`` does the actual HTTP call and mirrors its state here."""
+
+    __tablename__ = "webhook_deliveries"
+    __table_args__ = (Index("ix_webhook_deliveries_webhook_created", "webhook_id", "created_at"),)
+
+    id: Mapped[uuid.UUID] = _pk()
+    webhook_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("webhooks.id", ondelete="CASCADE"), nullable=False
+    )
+    event: Mapped[str] = mapped_column(String(40), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict, server_default="{}")
+    status: Mapped[str] = mapped_column(String(10), nullable=False, default="pending", server_default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    response_code: Mapped[int | None] = mapped_column(Integer)
+    last_error: Mapped[str | None] = mapped_column(String(500))
+    outbox_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    webhook: Mapped[Webhook] = relationship(back_populates="deliveries")
+
+
+class SavedView(Base):
+    """A named inbox filter preset (per project)."""
+
+    __tablename__ = "saved_views"
+
+    id: Mapped[uuid.UUID] = _pk()
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(60), nullable=False)
+    filters: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict, server_default="{}")
+    position: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    project: Mapped[Project] = relationship(back_populates="saved_views")
+
+
+class Outbox(Base):
+    """Transactional outbox: side effects (mail, webhooks) written in the same
+    transaction as the change that caused them, delivered by ``dbcore.worker``.
+
+    ``status``: pending (due at ``next_attempt_at``) | sending (claimed by a
+    worker) | sent | failed (gave up) | skipped (feature/mail disabled).
+    """
+
+    __tablename__ = "outbox"
+    __table_args__ = (Index("ix_outbox_status_due", "status", "next_attempt_at"),)
+
+    id: Mapped[uuid.UUID] = _pk()
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)        # email | webhook
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    project_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict, server_default="{}")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    status: Mapped[str] = mapped_column(String(10), nullable=False, default="pending", server_default="pending")
+    last_error: Mapped[str | None] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 # --------------------------------------------------------------------------- #
