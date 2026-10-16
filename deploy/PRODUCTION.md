@@ -22,14 +22,23 @@ third docker compose project without its own Caddy, and the 3m4 Caddy routes
    `IP_HASH_SECRET`, PostHog keys (`POSTHOG_API_KEY`, `POSTHOG_PERSONAL_API_KEY`,
    `VITE_POSTHOG_KEY`; flags are prefixed `retro-` in the shared PostHog
    project), RevenueCat keys when billing is switched on, a fresh Postgres
-   password (also in `DATABASE_URL`).
+   password (also in `DATABASE_URL`). Mail: `MAIL_ENABLED=true`, `SMTP_URL`
+   (`smtp://user:pass@host:587?starttls=1` or `smtps://…:465`) and `MAIL_FROM`
+   (`retro <no-reply@3m4.net>`; the sending domain needs SPF/DKIM for the
+   provider you pick). Leave `MAIL_ENABLED=false` to run without mail: replies
+   answer 503 and digests are logged, nothing else changes.
 3. **Start**
    ```sh
    cd /opt/retro/deploy
    docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
    ```
-   Container names are stable (`retro-api-1`, `retro-web-1`, `retro-mcp-1`):
-   compose project `retro`, one replica each. The edge Caddy routes by name.
+   Container names are stable (`retro-api-1`, `retro-web-1`, `retro-mcp-1`,
+   `retro-worker-1`): compose project `retro`, one replica each. The edge
+   Caddy routes by name. The `worker` service (same image as `api`, command
+   `python -m dbcore.worker`) delivers the outbox: email digests, replies and
+   webhooks. It has no port; it only needs the database and outbound network.
+   One replica is enough (jobs are claimed with `FOR UPDATE SKIP LOCKED`, so a
+   second replica is safe if ever needed).
 4. **Edge routing** — in `/opt/3m4` (branch `deploy/retro-edge-routing` in the
    3m4 repo adds this):
    - `deploy/docker-compose.prod.yml`: the `caddy` service is already attached
@@ -58,6 +67,14 @@ third docker compose project without its own Caddy, and the 3m4 Caddy routes
    `DEPLOY_SSH_KEY`, and repo variable `DEPLOY_ENABLED=true`. After that every
    push to `main` redeploys via `.github/workflows/deploy.yml`.
 
+## Turnstile (per project, no server config)
+
+Cloudflare Turnstile is configured by each project owner in the dashboard
+(site key + secret). The API only needs outbound HTTPS to
+`challenges.cloudflare.com` (`TURNSTILE_VERIFY_URL`, default set). Nothing to
+provision on the server; the widget loads Cloudflare's script from the
+visitor's browser.
+
 ## Smoke test after a deploy
 
 ```sh
@@ -66,7 +83,11 @@ curl -fsSI https://retro.3m4.net/widget.js | grep -i "access-control-allow-origi
 curl -fsS -X POST https://retro.3m4.net/api/ingest/feedback \
   -H "X-Project-Key: retro_pub_…" -H "Content-Type: application/json" \
   -d '{"type":"feedback","sentiment":"positive","message":"smoke test"}'
+docker logs --tail 20 retro-worker-1          # outbox worker alive, no tracebacks
 ```
+
+Or run the whole scripted walk (health, widget headers, ingest, export, saved
+views, cleanup): `BASE_URL=https://retro.3m4.net sh deploy/smoke.sh`.
 
 ## Scaling
 

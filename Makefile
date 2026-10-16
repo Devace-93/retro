@@ -8,7 +8,7 @@ COMPOSE      := docker compose --env-file .env -f deploy/docker-compose.yml
 COMPOSE_SH   := docker compose --env-file .env -f deploy/docker-compose.yml -f deploy/docker-compose.selfhost.yml
 BASE_URL     ?= http://localhost:8082
 
-.PHONY: help up up-selfhost down build rebuild logs ps migrate shell-api shell-db clean e2e widget smoke
+.PHONY: help up up-selfhost down build rebuild logs worker-logs ps migrate shell-api shell-db clean e2e widget smoke
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -31,6 +31,9 @@ rebuild: ## Rebuild from scratch (no cache)
 logs: ## Tail logs from all services
 	$(COMPOSE) logs -f --tail=100
 
+worker-logs: ## Tail the outbox worker (email digests, replies, webhook deliveries)
+	$(COMPOSE) logs -f --tail=100 worker
+
 ps: ## Show service status
 	$(COMPOSE) ps
 
@@ -49,7 +52,7 @@ clean: ## Stop and remove volumes (DESTRUCTIVE: wipes the database)
 widget: ## Build the embeddable widget into apps/web/public (widget.js + widget/v1.js)
 	cd packages/widget && bun install && bun run build
 
-smoke: ## Curl the running stack: health, widget headers, ingest round-trip (BASE_URL)
+smoke: ## Curl the running stack: health, widget headers, ingest, export, saved views (BASE_URL)
 	BASE_URL=$(BASE_URL) sh deploy/smoke.sh
 
 e2e: ## Run the Playwright end-to-end suite against the running stack (E2E_BASE_URL)

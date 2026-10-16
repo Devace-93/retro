@@ -122,6 +122,108 @@ Enable the board in project settings and share
 `https://retro.3m4.net/b/<slug>`: roadmap (planned / in progress / done) with
 votes, the changelog, and a form to submit ideas.
 
+## Beyond the inbox
+
+### Webhooks
+
+Each project can register up to a few HTTPS endpoints (plan limit
+`webhooks_per_project`). Events: `feedback.created`,
+`feedback.status_changed`, `roadmap.status_changed`, `changelog.published`
+and `ping` (from the **Test** button). Deliveries are retried with backoff and
+listed per webhook in the dashboard and at
+`GET /api/projects/:id/webhooks/:wid/deliveries`.
+
+```json
+{
+  "id": "delivery uuid",
+  "event": "feedback.created",
+  "created_at": "2026-10-15T10:00:00Z",
+  "project": { "id": "…", "key": "my-app", "name": "My app" },
+  "data": { "number": 123, "type": "bug", "status": "new", "title": "…", "previous_status": null }
+}
+```
+
+Headers: `X-Retro-Event`, `X-Retro-Delivery`, `User-Agent: retro-webhooks/1`
+and `X-Retro-Signature: sha256=<hex HMAC-SHA256 of the raw body>` with the
+secret shown once when the webhook is created. Verify before trusting:
+
+```js
+// Node (Express with `express.raw({ type: "application/json" })`)
+import { createHmac, timingSafeEqual } from "node:crypto";
+
+export function verifyRetro(rawBody, signatureHeader, secret) {
+  const expected = "sha256=" + createHmac("sha256", secret).update(rawBody).digest("hex");
+  const a = Buffer.from(expected), b = Buffer.from(signatureHeader ?? "");
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+```
+
+```python
+# Python
+import hmac, hashlib
+def verify_retro(raw_body: bytes, signature: str, secret: str) -> bool:
+    expected = "sha256=" + hmac.new(secret.encode(), raw_body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, signature or "")
+```
+
+Answer 2xx quickly; anything else is retried (up to 8 attempts over ~2 h).
+
+### Export
+
+`GET /api/projects/:id/export` returns the whole project as
+`retro.project.v1` JSON (feedback with notes, roadmap, changelog; screenshots
+are not included), and `?format=csv` downloads the feedback items as a CSV
+with the columns `number,type,sentiment,status,priority,tags,title,message,reporter_email,page_url,app_version,source,created_at`.
+Both are behind **Export JSON** / **Export CSV** in project settings.
+
+### Saved views
+
+Inbox filters (type, status, sentiment, priority, tag, screenshot, search,
+sort) can be saved as named views per project (up to 20). **New**, **Bugs**,
+**Features**, **Positive** and **Negative** are always there without being
+stored. API: `GET|POST /api/projects/:id/views`, `PATCH|DELETE …/views/:vid`.
+
+### Duplicate detection
+
+Every new item is compared (Postgres `pg_trgm`) with the project's items of
+the last 90 days of the same type; matches with similarity ≥ 0.45 appear as
+**Possible duplicates** in the inbox drawer and as `similar` on the item.
+**Merge into #n** declines the duplicate, sets `duplicate_of`, copies its tags
+onto the target, adds a `Merged #n` note there and keeps the reporter as a
+watcher of the target. `?duplicates=hide` filters merged items out of the
+inbox.
+
+### Spam protection (Cloudflare Turnstile)
+
+Optional, per project: set a Turnstile **site key** and **secret** in project
+settings. The widget and the public board then render an invisible challenge
+and send `turnstile_token`; the API verifies it with Cloudflare and answers
+`400 captcha_failed` when it is missing or invalid. If Cloudflare is
+unreachable the item is still stored and tagged `unverified` (feedback is
+never lost). Clear both keys to switch it off. The secret is write-only.
+
+### Notifications and replies
+
+The account owner gets an email per project with the new items, batched every
+`email_digest_minutes` (0 = one mail per item, 15, 60 (default) or 1440);
+switch it off or change the cadence at **Settings → Notifications**
+(`GET|PATCH /api/account/notifications`). **Reply** on an item with a
+reporter email sends your answer by mail (`POST …/feedback/:item/reply`) and
+keeps it as a note of kind `reply`.
+
+Mail is off until you configure it:
+
+```ini
+MAIL_ENABLED=true
+SMTP_URL=smtp://user:pass@smtp.example.com:587?starttls=1   # or smtps://…:465
+MAIL_FROM=retro <no-reply@example.com>
+```
+
+With `MAIL_ENABLED=false` (the default, and the local stack) replies answer
+`503 mail_disabled` and digests are logged and skipped. Delivery runs in the
+`worker` service (outbox table, `SELECT … FOR UPDATE SKIP LOCKED`, retries),
+which also delivers webhooks: `make worker-logs` tails it.
+
 ## AI agents (MCP)
 
 ```bash
@@ -152,6 +254,7 @@ _Coming with the first release: inbox, roadmap board, widget panel._
 | `make up` / `make down` | start / stop the full stack |
 | `make up-selfhost` | start without billing |
 | `make logs` | tail all logs |
+| `make worker-logs` | tail the outbox worker (mail + webhook deliveries) |
 | `make migrate` | create tables + apply Alembic migrations |
 | `make widget` | rebuild the widget bundle into `apps/web/public` |
 | `make smoke` | curl health, widget headers and an ingest round-trip |
