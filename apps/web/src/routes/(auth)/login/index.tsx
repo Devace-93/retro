@@ -27,11 +27,15 @@ export default component$(() => {
   // Resolved during render so the handler captures a string, not the store.
   const msgLoginFailed = tr(i18n, "auth.loginFailed");
 
-  const submit = $(async () => {
+  const submit = $(async (_: Event, form: HTMLFormElement) => {
+    // Read the form directly: inputs typed before Qwik resumed the onInput$
+    // handlers would otherwise be missing from the store.
+    const fd = new FormData(form);
+    const read = (k: string, fallback: string) => ((fd.get(k) as string | null) ?? fallback).trim();
     state.error = "";
     state.loading = true;
     try {
-      const res = await api.login(state.email, state.password);
+      const res = await api.login(read("email", state.email), read("password", state.password));
       setTokens(res.access_token, res.refresh_token);
       identify(res.user.id, res.account.id, res.account.plan);
       await nav("/dashboard");
@@ -63,6 +67,7 @@ export default component$(() => {
           </label>
           <input
             id="email"
+            name="email"
             type="email"
             required
             autoComplete="email"
@@ -77,6 +82,7 @@ export default component$(() => {
           </label>
           <input
             id="password"
+            name="password"
             type="password"
             required
             autoComplete="current-password"

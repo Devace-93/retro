@@ -5,7 +5,7 @@ import { API_URL, createProject, jwtHeaders, registerAccount, seedSession, type 
  * Saved views (CONTRACT.md → Phase 2 addendum → Saved views).
  *
  * UI hooks assumed on /dashboard/projects/[id] (inbox):
- *  - a strip with role="group" or nav named /views/i containing one
+ *  - a strip with role="tablist" (or group) named /views/i containing one role="tab" per view
  *    role="button" per view (virtual defaults first: New, Bugs, Features,
  *    Positive, Negative), then the saved ones;
  *  - a button named /save.*view/i that saves the current filters (prompts for
@@ -78,13 +78,13 @@ test.describe("saved views", () => {
 
     await seedSession(page, account);
     await page.goto(`/dashboard/projects/${project.id}`);
-    const strip = page.getByRole("group", { name: /views/i }).or(page.getByRole("navigation", { name: /views/i }));
+    const strip = page.getByRole("tablist", { name: /views/i }).or(page.getByRole("group", { name: /views/i }));
     await expect(strip.first()).toBeVisible();
     for (const name of [/^new$/i, /^bugs$/i, /^features$/i, /^positive$/i, /^negative$/i, /hot bugs/i]) {
-      await expect(strip.first().getByRole("button", { name })).toBeVisible();
+      await expect(strip.first().getByRole("tab", { name })).toBeVisible();
     }
-    await strip.first().getByRole("button", { name: /hot bugs/i }).click();
-    await expect(page.getByText("a bug")).toBeVisible();
-    await expect(page.getByText("a feature")).toHaveCount(0);
+    await strip.first().getByRole("tab", { name: /hot bugs/i }).click();
+    await expect(page.getByText("a bug").first()).toBeVisible();
+    await expect(page.getByText("a feature").first()).toHaveCount(0);
   });
 });

@@ -160,8 +160,11 @@ test.describe("webhooks", () => {
     expect(off.status()).toBe(200);
     expect((await off.json()).enabled).toBe(false);
 
-    // Limit: early access gives enterprise limits (unlimited), so we can only
-    // assert the hard cap of 5 per project from the contract.
+    // Limit: `webhooks_per_project` is plan-based (free 2, pro 5, team 20). While
+    // the `early-access` feature is ON every account gets the enterprise limits
+    // (unlimited), so the 402 can only be asserted when early access is off.
+    const me = await (await request.get(`${API_URL}/auth/me`, { headers: H })).json();
+    const earlyAccess = me.features?.["early-access"] !== false;
     for (let i = 0; i < 4; i++) {
       await createWebhook(request, account, project.id, { url: `http://${WEBHOOK_SINK_HOST}:9/h${i}` });
     }
@@ -169,8 +172,12 @@ test.describe("webhooks", () => {
       headers: H,
       data: { url: `http://${WEBHOOK_SINK_HOST}:9/sixth` },
     });
-    expect(sixth.status(), await sixth.text()).toBe(402);
-    expect((await sixth.json()).error.which).toBe("webhooks");
+    if (earlyAccess) {
+      expect(sixth.status(), await sixth.text()).toBe(201);
+    } else {
+      expect(sixth.status(), await sixth.text()).toBe(402);
+      expect((await sixth.json()).error.which).toBe("webhooks");
+    }
 
     const del = await request.delete(`${API_URL}/projects/${project.id}/webhooks/${hook.id}`, { headers: H });
     expect(del.status()).toBe(204);

@@ -15,7 +15,7 @@ say "health"
 curl -fsS "$API/healthz" | grep -q '"ok"' && echo "  api ok"
 
 say "widget headers"
-curl -fsSI "$BASE_URL/widget.js" | tr -d '\r' | grep -iE '^(content-type|cache-control|access-control-allow-origin):' | sed 's/^/  /'
+curl -fsS -o /dev/null -D - "$BASE_URL/widget.js" | tr -d "\r" | grep -iE '^(content-type|cache-control|access-control-allow-origin):' | sed 's/^/  /'
 
 say "register + project"
 EMAIL="smoke+$(date +%s)@example.com"

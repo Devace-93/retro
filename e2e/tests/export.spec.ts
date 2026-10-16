@@ -85,7 +85,7 @@ test.describe("export", () => {
     await seedSession(page, account);
     await page.goto(`/dashboard/projects/${project.id}/settings`);
     const jsonCtl = page.getByRole("link", { name: /export json/i }).or(page.getByRole("button", { name: /export json/i }));
-    const csvCtl = page.getByRole("link", { name: /export csv/i }).or(page.getByRole("button", { name: /export csv/i }));
+    const csvCtl = page.getByRole("link", { name: /export.*csv/i }).or(page.getByRole("button", { name: /export.*csv/i }));
     await expect(jsonCtl.first()).toBeVisible();
     await expect(csvCtl.first()).toBeVisible();
   });

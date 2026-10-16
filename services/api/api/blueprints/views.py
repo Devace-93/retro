@@ -40,11 +40,14 @@ def _get_view(session, project, vid: str) -> SavedView:
 
 
 def validate_filters(raw) -> dict:
-    """Keep only the known inbox filters, normalised to the query-string form."""
+    """Validate the inbox filters (unknown keys are rejected) and normalise them to the query-string form."""
     if raw is None:
         return {}
     if not isinstance(raw, dict):
         raise ApiError(400, "invalid_filters", "filters must be an object.")
+    unknown = sorted(set(raw) - set(_LIST_FILTERS) - {"q", "tag", "has_screenshot", "sort", "duplicates"})
+    if unknown:
+        raise ApiError(400, "invalid_filters", f"Unknown filter(s): {', '.join(unknown)}.")
     out: dict = {}
     for key, allowed in _LIST_FILTERS.items():
         if key in raw and raw[key] not in (None, "", []):
@@ -128,9 +131,19 @@ def patch_view(project_id, vid):
             view.filters = validate_filters(data.get("filters"))
         if "position" in data:
             try:
-                view.position = max(int(data.get("position")), 0)
+                target = max(int(data.get("position")), 0)
             except (TypeError, ValueError):
                 raise ApiError(400, "invalid_position", "position must be an integer.")
+            # `position` is an insert index: move this view there and renumber
+            # the project's views 0..n so the order is total and gap-free.
+            siblings = list(session.scalars(
+                select(SavedView)
+                .where(SavedView.project_id == project.id, SavedView.id != view.id)
+                .order_by(SavedView.position, SavedView.created_at)
+            ))
+            siblings.insert(min(target, len(siblings)), view)
+            for index, item in enumerate(siblings):
+                item.position = index
         session.flush()
         session.refresh(view)
         body = serialize_saved_view(view)

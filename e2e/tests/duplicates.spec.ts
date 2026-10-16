@@ -90,7 +90,9 @@ test.describe("duplicates", () => {
     await page.getByText(NEAR.slice(0, 40)).first().click();
     const dup = page.getByText(/possible duplicates/i);
     await expect(dup).toBeVisible();
+    // Two-step merge: the button arms itself ("Merge into #n" → "Confirm").
     await page.getByRole("button", { name: new RegExp(`merge into #${a.body.number}`, "i") }).click();
+    await page.getByRole("button", { name: /^confirm$/i }).click();
     await expect(page.getByText(new RegExp(`duplicate of #${a.body.number}`, "i")).first()).toBeVisible();
 
     const detail = await getFeedback(request, account, project.id, b.body.id);
