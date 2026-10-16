@@ -5,7 +5,7 @@ description. Record them against the local stack (`make up`, http://localhost:80
 and drop the files here, named after the branch (`feat-inbox-drawer.gif`,
 `feat-inbox-drawer.webm`). Keep GIFs under ~5 MB; the webm is the full-quality copy.
 
-## Phase 2 e2e (branch `phase-2/e2e`)
+## Phase 2 e2e (branch `phase-2`)
 
 New specs under `e2e/tests/`: `webhooks`, `export`, `views`, `duplicates`,
 `notifications`, `turnstile`. They are written against CONTRACT.md's Phase 2
