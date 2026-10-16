@@ -26,8 +26,11 @@ def find_similar(session: Session, project_id, type_: str, message: str, exclude
         return []
     since = datetime.now(timezone.utc) - timedelta(days=WINDOW_DAYS)
     # The `%` operator is what the GIN trigram index serves; the threshold is
-    # a session setting, so pin it for this transaction only.
-    session.execute(text("SET LOCAL pg_trgm.similarity_threshold = :t").bindparams(t=THRESHOLD))
+    # a session setting, so pin it for this transaction only (set_config with
+    # is_local=true == SET LOCAL, but it accepts a bind parameter).
+    session.execute(
+        text("SELECT set_config('pg_trgm.similarity_threshold', :t, true)").bindparams(t=str(THRESHOLD))
+    )
     sim = func.similarity(FeedbackItem.message, message)
     stmt = (
         select(FeedbackItem.id, FeedbackItem.number, sim)

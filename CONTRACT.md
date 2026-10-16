@@ -625,3 +625,44 @@ switch: it is per-project configuration.
 
 `MAIL_ENABLED=false`, `SMTP_URL=`, `MAIL_FROM=retro <no-reply@3m4.net>`,
 `WEBHOOK_TIMEOUT_SECONDS=10`, `TURNSTILE_VERIFY_URL=https://challenges.cloudflare.com/turnstile/v0/siteverify`.
+
+### Phase 2 implementation notes (backend, 2026-10-15)
+
+Small additions and precisions over the addendum above, as built:
+
+- `Board` (public) also carries `turnstile_site_key` (string | null) so the
+  board page can render the challenge; `WidgetConfig` has it as specified.
+- `FeedbackItem` detail (`GET …/feedback/:item`) carries `similar`,
+  `duplicate_of` **and** `watchers` (the merged reporters' emails); the list
+  carries `duplicate_of` only. `GET …/feedback?duplicates=hide|show` (default
+  `show`).
+- Notes: `kind` ∈ `note` | `reply`; `delivery` ∈ `pending` | `sent` |
+  `failed` | `skipped` (only on replies; `skipped` = mail was switched off
+  before the worker got to it). Merge writes a system note on the target with
+  `author: {id: null, email: null, label: "system"}`.
+- Digests are only queued while mail is *available* (feature `mail` ON and
+  `MAIL_ENABLED` + `SMTP_URL` set): switching mail on later does not replay
+  older items. The digest goes to the account owner (first `owner`
+  membership). Item links are `/dashboard/projects/<id>?item=<number>`.
+- Webhook secrets look like `whsec_…` (`secret_prefix` = first 12 chars).
+  `events` omitted on create ⇒ all five events stored explicitly. A `ping` is
+  delivered even to a disabled webhook (that is what "test" is for); other
+  events skip disabled hooks at delivery time. Deliveries list is capped at
+  100. `http://` targets are accepted only while `APP_BASE_URL` is not https.
+- Outbox statuses: `pending` | `sending` (claimed) | `sent` | `failed` |
+  `skipped`. A job stuck in `sending` for over an hour (worker died) is
+  released back to `pending` by the hourly cleanup, which also drops
+  terminal rows older than 7 days.
+- Audit actions added: `webhook.create|update|delete`, `feedback.reply`,
+  `feedback.merge`, `account.notifications`.
+- Scopes: `GET /account/notifications` needs `usage:read`,
+  `PATCH /account/notifications` needs `projects:write`; export needs both
+  `feedback:read` and `board:read`; webhook CRUD follows `projects:*`
+  (delete = `projects:delete`); saved views follow `feedback:read|write`.
+- Error codes added: `no_reporter_email`, `mail_disabled` (503),
+  `captcha_failed`, `invalid_merge`, `missing_into`, `invalid_url`,
+  `invalid_events`, `too_many_views`, `invalid_filters`, `invalid_digest`,
+  `invalid_format`; 402 `limit_reached` with `which: "webhooks"`.
+- Env: `MAIL_ENABLED`, `SMTP_URL`, `MAIL_FROM`, `WEBHOOK_TIMEOUT_SECONDS`,
+  `TURNSTILE_VERIFY_URL`, `WORKER_POLL_SECONDS`. Compose service `worker`
+  (`python -m dbcore.worker`; `--once` drains and exits).
