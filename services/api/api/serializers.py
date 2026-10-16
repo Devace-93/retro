@@ -97,6 +97,8 @@ def serialize_project(project, counts: dict | None = None) -> dict:
         "allow_screenshots": project.allow_screenshots,
         "allow_email": project.allow_email,
         "widget_accent": project.widget_accent,
+        "turnstile_site_key": project.turnstile_site_key,
+        "turnstile_enabled": bool(project.turnstile_site_key and project.turnstile_secret),
         "counts": {
             "feedback": counts.get("feedback", 0),
             "new": counts.get("new", 0),
@@ -113,11 +115,19 @@ def serialize_note(note) -> dict:
         author = {"id": str(note.author.id), "email": note.author.email}
     elif note.author_label:
         author = {"id": None, "email": None, "label": note.author_label}
-    return {"id": str(note.id), "body": note.body, "author": author, "created_at": iso(note.created_at)}
+    return {
+        "id": str(note.id),
+        "body": note.body,
+        "author": author,
+        "kind": note.kind or "note",
+        "delivery": note.delivery if (note.kind or "note") == "reply" else None,
+        "created_at": iso(note.created_at),
+    }
 
 
-def serialize_feedback(item, *, with_notes: bool = False) -> dict:
-    """Exactly the CONTRACT.md "FeedbackItem" shape. ``notes`` only on detail."""
+def serialize_feedback(item, *, with_notes: bool = False, similar: list | None = None) -> dict:
+    """Exactly the CONTRACT.md "FeedbackItem" shape. ``notes`` and ``similar``
+    only on detail (``similar`` is resolved by the caller from ``similar_ids``)."""
     attachment = item.attachment
     body = {
         "id": str(item.id),
@@ -150,12 +160,35 @@ def serialize_feedback(item, *, with_notes: bool = False) -> dict:
             else None
         ),
         "roadmap_item_id": str(item.roadmap_item_id) if item.roadmap_item_id else None,
+        "duplicate_of": str(item.duplicate_of) if item.duplicate_of else None,
         "created_at": iso(item.created_at),
         "updated_at": iso(item.updated_at),
     }
     if with_notes:
         body["notes"] = [serialize_note(n) for n in item.notes]
+        body["similar"] = similar if similar is not None else []
+        body["watchers"] = list(item.watchers or [])
     return body
+
+
+def serialize_similar(items_by_id: dict, similar_ids: list) -> list[dict]:
+    """``[{id, number, title, status, similarity}]`` from the stored
+    ``similar_ids`` and the matching rows (missing rows were deleted)."""
+    out = []
+    for entry in similar_ids or []:
+        row = items_by_id.get(str(entry.get("id")))
+        if row is None:
+            continue
+        out.append(
+            {
+                "id": str(row.id),
+                "number": row.number,
+                "title": row.title,
+                "status": row.status,
+                "similarity": entry.get("similarity"),
+            }
+        )
+    return out
 
 
 def serialize_roadmap_item(item, feedback_count: int = 0) -> dict:
@@ -221,8 +254,15 @@ def serialize_widget_config(project, features: dict) -> dict:
         "allow_email": project.allow_email,
         "accent": project.widget_accent,
         "board_url": board_url(project) if boards else None,
+        "turnstile_site_key": turnstile_site_key(project),
         "features": {"screenshots": screenshots, "public_boards": boards},
     }
+
+
+def turnstile_site_key(project) -> str | None:
+    """The public site key, only when the secret is configured too (both are
+    needed for verification to actually run)."""
+    return project.turnstile_site_key if project.turnstile_site_key and project.turnstile_secret else None
 
 
 def serialize_board(project, roadmap: dict, changelog: list) -> dict:
@@ -242,6 +282,7 @@ def serialize_board(project, roadmap: dict, changelog: list) -> dict:
         "can_submit": project.allow_board_submissions,
         "can_vote": project.allow_votes,
         "types_enabled": list(project.types_enabled or []),
+        "turnstile_site_key": turnstile_site_key(project),
     }
 
 
@@ -265,6 +306,55 @@ def serialize_usage(counter, limits: dict, counts: dict, attachment_bytes: int =
         "attachment_bytes": attachment_bytes,
         "counts": counts,
         "limits": limits,
+    }
+
+
+def serialize_webhook(hook, secret: str | None = None) -> dict:
+    """The secret is only present on creation."""
+    body = {
+        "id": str(hook.id),
+        "url": hook.url,
+        "events": list(hook.events or []),
+        "description": hook.description,
+        "enabled": hook.enabled,
+        "secret_prefix": hook.secret_prefix,
+        "last_delivery_at": iso(hook.last_delivery_at),
+        "last_status": hook.last_status,
+        "created_at": iso(hook.created_at),
+    }
+    if secret is not None:
+        body["secret"] = secret
+    return body
+
+
+def serialize_delivery(delivery) -> dict:
+    return {
+        "id": str(delivery.id),
+        "event": delivery.event,
+        "status": delivery.status,
+        "attempts": delivery.attempts,
+        "response_code": delivery.response_code,
+        "last_error": delivery.last_error,
+        "created_at": iso(delivery.created_at),
+        "delivered_at": iso(delivery.delivered_at),
+    }
+
+
+def serialize_saved_view(view) -> dict:
+    return {
+        "id": str(view.id),
+        "name": view.name,
+        "filters": dict(view.filters or {}),
+        "position": view.position,
+        "created_at": iso(view.created_at),
+    }
+
+
+def serialize_notifications(account, email: str | None) -> dict:
+    return {
+        "email_new_feedback": account.email_new_feedback,
+        "email_digest_minutes": account.email_digest_minutes,
+        "email": email,
     }
 
 

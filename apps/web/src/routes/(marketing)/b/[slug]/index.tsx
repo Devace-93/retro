@@ -1,4 +1,6 @@
 import { component$, useStore, useVisibleTask$, $ } from "@builder.io/qwik";
+import { ApiRequestError } from "../../../../lib/api";
+import { turnstileToken, loadTurnstile } from "../../../../lib/turnstile";
 import { Link, useLocation, type DocumentHead } from "@builder.io/qwik-city";
 import { useBoard } from "./layout";
 import { api } from "../../../../lib/api";
@@ -38,7 +40,8 @@ export default component$(() => {
     submitting: boolean;
     error: string;
     done: number | null;
-  }>({ open: false, type: "feature", message: "", email: "", website: "", submitting: false, error: "", done: null });
+    turnstileReady: boolean;
+  }>({ open: false, type: "feature", message: "", email: "", website: "", submitting: false, error: "", done: null, turnstileReady: false });
 
   // eslint-disable-next-line qwik/no-use-visible-task
   useVisibleTask$(() => {
@@ -46,6 +49,10 @@ export default component$(() => {
     if (result.value.ok) {
       const types = result.value.board.types_enabled;
       if (!types.includes(form.type)) form.type = types[0] ?? "feedback";
+      // Cloudflare Turnstile is loaded lazily, only when the project asks for it.
+      if (result.value.board.turnstile_site_key && result.value.board.can_submit) {
+        loadTurnstile().then(() => (form.turnstileReady = true)).catch(() => {});
+      }
     }
   });
 
@@ -76,17 +83,22 @@ export default component$(() => {
     form.submitting = true;
     form.error = "";
     try {
+      const siteKey = result.value.ok ? result.value.board.turnstile_site_key : null;
+      const turnstile_token = siteKey ? await turnstileToken(siteKey, "#board-turnstile") : undefined;
       const res = await api.boardSubmit(slug, {
         type: form.type,
         message: form.message.trim(),
         email: form.email.trim() || undefined,
         website: form.website,
+        turnstile_token,
       });
       form.done = res.number;
       form.message = "";
       form.email = "";
     } catch (e) {
-      form.error = (e as Error)?.message || tr(i18n, "board.submitFailed");
+      form.error = e instanceof ApiRequestError && e.error.code === "captcha_failed"
+        ? tr(i18n, "board.captchaFailed")
+        : (e as Error)?.message || tr(i18n, "board.submitFailed");
     } finally {
       form.submitting = false;
     }
@@ -210,6 +222,7 @@ export default component$(() => {
                   <label for="website">Website</label>
                   <input id="website" type="text" tabIndex={-1} autoComplete="off" value={form.website} onInput$={(_, el) => (form.website = el.value)} />
                 </div>
+                {board.turnstile_site_key && <div id="board-turnstile" class="min-h-[1px]" data-testid="turnstile" />}
                 <div class="flex justify-end">
                   <button type="submit" class="btn-primary" disabled={form.submitting || !form.message.trim()}>
                     {form.submitting ? tr(i18n, "board.sending") : tr(i18n, "board.send")}

@@ -24,6 +24,7 @@ import type {
   IngestResponse,
   MeResponse,
   Note,
+  NotificationSettings,
   Paginated,
   Project,
   ProjectPatch,
@@ -31,8 +32,13 @@ import type {
   RoadmapItem,
   RoadmapStatus,
   RolesResponse,
+  SavedView,
+  SavedViewFilters,
   Summary,
   Usage,
+  Webhook,
+  WebhookDelivery,
+  WebhookEvent,
 } from "./types";
 
 const BASE = (import.meta.env.VITE_API_URL || "/api").replace(/\/$/, "");
@@ -204,6 +210,7 @@ export const api = {
         page: query.page ?? 1,
         per_page: query.per_page ?? 50,
         sort: query.sort,
+        duplicates: query.duplicates,
       })}`,
     ),
 
@@ -294,7 +301,7 @@ export const api = {
 
   boardSubmit: (
     slug: string,
-    input: { type: FeedbackType; message: string; title?: string; email?: string; sentiment?: string; website: string },
+    input: { type: FeedbackType; message: string; title?: string; email?: string; sentiment?: string; website: string; turnstile_token?: string },
   ) =>
     apiFetch<IngestResponse>(`${b(slug)}/feedback`, {
       method: "POST",
@@ -321,6 +328,69 @@ export const api = {
     }),
 
   deleteApiKey: (id: string) => apiFetch<void>(`/apikeys/${enc(id)}`, { method: "DELETE" }),
+
+  /* ─── Phase 2: replies, duplicates, export ───────────────────────────── */
+  /** Email the reporter. 400 no_reporter_email · 503 mail_disabled. */
+  replyToReporter: (id: string, item: string, body: string) =>
+    apiFetch<Note>(`${p(id)}/feedback/${enc(item)}/reply`, { method: "POST", body: { body } }),
+
+  /** Mark `item` as a duplicate of `into` (declined + duplicate_of). */
+  mergeFeedback: (id: string, item: string, into: string) =>
+    apiFetch<FeedbackItem>(`${p(id)}/feedback/${enc(item)}/merge`, { method: "POST", body: { into } }),
+
+  /**
+   * Download an export. Browsers cannot send the bearer token on a plain link,
+   * so the file is fetched and handed to the browser as an object URL.
+   */
+  exportProject: async (id: string, format: "json" | "csv", filename: string): Promise<void> => {
+    const res = await rawFetch(`${p(id)}/export${qs({ format })}`);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  },
+
+  /* ─── Phase 2: saved views ───────────────────────────────────────────── */
+  listViews: (id: string) => apiFetch<SavedView[]>(`${p(id)}/views`),
+
+  createView: (id: string, name: string, filters: SavedViewFilters) =>
+    apiFetch<SavedView>(`${p(id)}/views`, { method: "POST", body: { name, filters } }),
+
+  updateView: (id: string, vid: string, input: { name?: string; filters?: SavedViewFilters; position?: number }) =>
+    apiFetch<SavedView>(`${p(id)}/views/${enc(vid)}`, { method: "PATCH", body: input }),
+
+  deleteView: (id: string, vid: string) => apiFetch<void>(`${p(id)}/views/${enc(vid)}`, { method: "DELETE" }),
+
+  /* ─── Phase 2: webhooks ──────────────────────────────────────────────── */
+  listWebhooks: (id: string) => apiFetch<Webhook[]>(`${p(id)}/webhooks`),
+
+  createWebhook: (id: string, input: { url: string; events?: WebhookEvent[]; description?: string }) =>
+    apiFetch<Webhook>(`${p(id)}/webhooks`, { method: "POST", body: input }),
+
+  updateWebhook: (
+    id: string,
+    wid: string,
+    input: { url?: string; events?: WebhookEvent[]; description?: string | null; enabled?: boolean },
+  ) => apiFetch<Webhook>(`${p(id)}/webhooks/${enc(wid)}`, { method: "PATCH", body: input }),
+
+  deleteWebhook: (id: string, wid: string) => apiFetch<void>(`${p(id)}/webhooks/${enc(wid)}`, { method: "DELETE" }),
+
+  testWebhook: (id: string, wid: string) =>
+    apiFetch<{ delivery_id: string }>(`${p(id)}/webhooks/${enc(wid)}/test`, { method: "POST" }),
+
+  webhookDeliveries: (id: string, wid: string, limit = 20) =>
+    apiFetch<WebhookDelivery[]>(`${p(id)}/webhooks/${enc(wid)}/deliveries${qs({ limit })}`),
+
+  /* ─── Phase 2: notifications (account) ──────────────────────────────── */
+  notificationSettings: () => apiFetch<NotificationSettings>("/account/notifications"),
+
+  updateNotificationSettings: (input: { email_new_feedback?: boolean; email_digest_minutes?: number }) =>
+    apiFetch<NotificationSettings>("/account/notifications", { method: "PATCH", body: input }),
 
   /* ─── Billing ────────────────────────────────────────────────────────── */
   billingOfferings: () => apiFetch<unknown>("/billing/offerings"),

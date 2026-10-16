@@ -219,6 +219,25 @@ export const marketing = {
   "docs.mcpRemote": "Remote (Streamable HTTP)",
   "docs.mcpTools":
     "Tools: list_projects, get_project, create_project, update_project, rotate_project_key, delete_project, list_feedback, get_feedback, feedback_summary, list_tags, update_feedback, add_note, promote_to_roadmap, delete_feedback, list_roadmap, create_roadmap_item, update_roadmap_item, delete_roadmap_item, list_changelog, create_changelog_entry, update_changelog_entry, delete_changelog_entry, get_usage, get_audit_log.",
+  "docs.webhooksTitle": "Webhooks",
+  "docs.webhooksBody":
+    "Get a signed POST on your server when feedback arrives or changes status, when a roadmap item moves, or when a changelog entry is published. Add endpoints in the project settings; each one gets a secret shown once.",
+  "docs.webhooksEvents": "Events: feedback.created, feedback.status_changed, roadmap.status_changed, changelog.published, ping.",
+  "docs.webhooksHeaders": "Headers: X-Retro-Event, X-Retro-Delivery (unique id, use it to de-duplicate) and X-Retro-Signature (sha256=<hex HMAC-SHA256 of the raw body with your secret>).",
+  "docs.webhooksRetry": "A 2xx within 10 s counts as delivered; anything else is retried with exponential backoff (1 min → 2 h, 8 attempts). The deliveries log in the project settings shows every attempt.",
+  "docs.webhooksVerify": "Verify the signature",
+  "docs.exportTitle": "Export",
+  "docs.exportBody":
+    "One call returns everything in a project as retro.project.v1 JSON (feedback with notes, roadmap, changelog) or a CSV of the feedback items. Screenshots are never included. The same buttons live in the project settings.",
+  "docs.turnstileTitle": "Spam protection (Cloudflare Turnstile)",
+  "docs.turnstileBody":
+    "The honeypot field and per-IP rate limits are always on. For public-facing apps you can add a Cloudflare Turnstile challenge: set the site key and secret in the project settings and the widget and board render it automatically. API clients must send turnstile_token; invalid tokens get 400 captcha_failed, and if Cloudflare is unreachable the item is accepted and tagged unverified.",
+  "docs.notifyTitle": "Notifications & replies",
+  "docs.notifyBody":
+    "The account owner gets an email per project when new feedback arrives, instantly or grouped every 15 minutes, hour or day (Dashboard → API keys → Notifications). From the inbox you can reply to any reporter who left an email: the mail goes out from retro with your address as Reply-To. Both need outbound mail configured on the server (MAIL_ENABLED).",
+  "docs.duplicatesTitle": "Duplicates & saved views",
+  "docs.duplicatesBody":
+    "Every new item is compared with the project's recent items (trigram similarity); likely duplicates show up in the detail drawer and can be merged in one click (the merged item becomes a declined duplicate). Saved views keep your favourite inbox filters one click away.",
   "docs.colMethod": "Method",
   "docs.colPath": "Path",
   "docs.colScope": "Scope",
@@ -241,6 +260,7 @@ export const marketing = {
   "board.submitFailed": "Could not send your feedback. Please try again.",
   "board.thanksTitle": "Thank you!",
   "board.thanksBody": "Your feedback was received as #{number}.",
+  "board.captchaFailed": "The anti-spam check failed. Please try again.",
   "board.submitAnother": "Send another",
   "board.backToRoadmap": "← Back to the roadmap",
   "board.noChangelog": "No release notes yet.",

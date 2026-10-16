@@ -18,14 +18,19 @@ export type FeatureKey =
   | "ingest-api"
   | "screenshots"
   | "public-boards"
-  | "billing";
+  | "billing"
+  | "webhooks"
+  | "mail";
 
 export type Features = Record<FeatureKey, boolean>;
 
 /** Fail-safe defaults from the shared registry (used until the API answers). */
-export const FEATURE_DEFAULTS: Features = Object.fromEntries(
-  Object.entries(registry.flags).map(([k, v]) => [k, v.default]),
-) as Features;
+export const FEATURE_DEFAULTS: Features = {
+  // Phase 2 switches: ON until the shared registry lists them.
+  webhooks: true,
+  mail: true,
+  ...(Object.fromEntries(Object.entries(registry.flags).map(([k, v]) => [k, v.default])) as Partial<Features>),
+} as Features;
 
 /** Merge a server-resolved feature map over the defaults. */
 export function mergeFeatures(server?: Record<string, boolean>): Features {

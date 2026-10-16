@@ -10,7 +10,8 @@ import { api, ApiRequestError } from "../../../../lib/api";
 import { errorMessage, isLimitError } from "../../../../lib/errors";
 import { FeaturesContext } from "../../../../lib/features";
 import { tr, useI18n } from "../../../../i18n";
-import type { ApiKey, ApiKeyRole, AuditEvent, RoleInfo } from "../../../../lib/types";
+import type { ApiKey, ApiKeyRole, AuditEvent, DigestMinutes, NotificationSettings, RoleInfo } from "../../../../lib/types";
+import { Switch } from "../../../../components/switch";
 import roleRegistry from "../../../../../../../packages/shared/api_key_roles.json";
 
 // Shared registry as the fallback until GET /apikeys/roles answers.
@@ -23,8 +24,12 @@ const AUDIT_ACTIONS = [
   "roadmap.create", "roadmap.update", "roadmap.delete", "roadmap.reorder",
   "changelog.create", "changelog.update", "changelog.delete", "changelog.publish",
   "apikey.create", "apikey.revoke",
+  "feedback.reply", "feedback.merge",
+  "webhook.create", "webhook.update", "webhook.delete",
   "auth.denied",
 ];
+
+const DIGEST_OPTIONS: DigestMinutes[] = [0, 15, 60, 1440];
 
 const OUTCOME_CLASS: Record<string, string> = {
   ok: "bg-green-100 text-green-800",
@@ -67,6 +72,41 @@ export default component$(() => {
     action: string;
   }>({ items: [], loading: true, error: "", action: "" });
 
+  const notify = useStore<{
+    settings: NotificationSettings | null;
+    loading: boolean;
+    error: string;
+    saved: boolean;
+    busy: boolean;
+  }>({ settings: null, loading: true, error: "", saved: false, busy: false });
+
+  const loadNotify = $(async () => {
+    notify.loading = true;
+    notify.error = "";
+    try {
+      notify.settings = await api.notificationSettings();
+    } catch (e) {
+      notify.error = errorMessage(i18n, e, "notify.loadFailed");
+    } finally {
+      notify.loading = false;
+    }
+  });
+
+  const saveNotify = $(async (patch: { email_new_feedback?: boolean; email_digest_minutes?: number }) => {
+    notify.busy = true;
+    notify.error = "";
+    notify.saved = false;
+    try {
+      notify.settings = await api.updateNotificationSettings(patch);
+      notify.saved = true;
+      setTimeout(() => (notify.saved = false), 1500);
+    } catch (e) {
+      notify.error = errorMessage(i18n, e, "notify.saveFailed");
+    } finally {
+      notify.busy = false;
+    }
+  });
+
   const loadAudit = $(async () => {
     audit.loading = true;
     audit.error = "";
@@ -108,6 +148,7 @@ export default component$(() => {
   // eslint-disable-next-line qwik/no-use-visible-task
   useVisibleTask$(() => {
     load();
+    loadNotify();
   });
 
   const create = $(async () => {
@@ -288,6 +329,47 @@ export default component$(() => {
           </div>
         </>
       )}
+
+      {/* Notifications */}
+      <section class="mt-10 card p-6" id="notifications" data-testid="notifications">
+        <h2 class="text-xl font-bold text-slate-900">{tr(i18n, "notify.title")}</h2>
+        <p class="text-sm text-slate-500">{tr(i18n, "notify.body")}</p>
+        {notify.error && <div class="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{notify.error}</div>}
+        {!features.mail && <p class="mt-3 text-xs text-amber-700">{tr(i18n, "notify.mailOff")}</p>}
+        {notify.loading ? (
+          <div class="mt-4 text-sm text-slate-400">{tr(i18n, "common.loading")}</div>
+        ) : notify.settings && (
+          <div class="mt-4 space-y-4">
+            <label class="flex items-center justify-between gap-3 rounded-lg border border-slate-200 p-3 text-sm">
+              <span class="font-medium text-slate-800">{tr(i18n, "notify.emailNew")}</span>
+              <Switch
+                checked={notify.settings.email_new_feedback}
+                label={tr(i18n, "notify.emailNew")}
+                disabled={notify.busy}
+                onToggle$={(next) => saveNotify({ email_new_feedback: next })}
+              />
+            </label>
+            <div class="flex flex-wrap items-center gap-3 text-sm">
+              <label class="label mb-0" for="digest">{tr(i18n, "notify.digest")}</label>
+              <select
+                id="digest"
+                class="input w-auto"
+                disabled={notify.busy || !notify.settings.email_new_feedback}
+                value={String(notify.settings.email_digest_minutes)}
+                onChange$={(_, el) => saveNotify({ email_digest_minutes: Number(el.value) })}
+              >
+                {DIGEST_OPTIONS.map((m) => (
+                  <option key={m} value={String(m)} selected={m === notify.settings!.email_digest_minutes}>
+                    {m === 0 ? tr(i18n, "notify.instant") : m === 15 ? tr(i18n, "notify.every15") : m === 60 ? tr(i18n, "notify.every60") : tr(i18n, "notify.daily")}
+                  </option>
+                ))}
+              </select>
+              {notify.saved && <span class="text-xs text-green-700">{tr(i18n, "common.saved")}</span>}
+            </div>
+            {notify.settings.email && <p class="text-xs text-slate-500">{tr(i18n, "notify.sentTo", { email: notify.settings.email })}</p>}
+          </div>
+        )}
+      </section>
 
       {/* Audit log */}
       <section class="mt-10">

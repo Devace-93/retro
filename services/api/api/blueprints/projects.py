@@ -14,17 +14,20 @@ blueprints.
 """
 from __future__ import annotations
 
+import csv
+import io
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from flask import Blueprint, g, jsonify, request
+from flask import Blueprint, Response, g, jsonify, request
 from sqlalchemy import func, or_, select
+from sqlalchemy.orm import selectinload
 
 from dbcore import audit
 from dbcore.config import config
 from dbcore.db import session_scope
 from dbcore.feedback import SENTIMENTS, STATUSES, TYPES, is_hex_color
-from dbcore.models import Account, FeedbackItem, Project, RoadmapItem
+from dbcore.models import ChangelogEntry, Account, FeedbackItem, FeedbackNote, Project, RoadmapItem
 from dbcore.plans import effective_plan_limits, within_limit
 from dbcore.posthog_client import capture
 from dbcore.slugs import (
@@ -38,7 +41,14 @@ from dbcore.slugs import (
 from ..auth_utils import PUBLIC_KEY_PREFIX, actor, generate_secret_key, hash_token, require_auth_or_api_key, require_scope
 from ..errors import ApiError
 from ..extensions import limiter, public_api_key_func
-from ..serializers import json_body, serialize_project
+from ..serializers import (
+    iso,
+    json_body,
+    serialize_changelog_entry,
+    serialize_feedback,
+    serialize_project,
+    serialize_roadmap_item,
+)
 
 bp = Blueprint("projects", __name__)
 
@@ -266,6 +276,15 @@ def patch_project(project_id):
             project.widget_accent = accent.lower() if accent else None
             changed.append("widget_accent")
 
+        # Turnstile: site key is public, secret is write-only. Clearing either
+        # disables verification (both are needed, see serializers.turnstile_site_key).
+        if "turnstile_site_key" in data:
+            project.turnstile_site_key = (data.get("turnstile_site_key") or "").strip()[:120] or None
+            changed.append("turnstile_site_key")
+        if "turnstile_secret" in data:
+            project.turnstile_secret = (data.get("turnstile_secret") or "").strip()[:120] or None
+            changed.append("turnstile_secret")
+
         audit.record(
             session,
             account_id=g.account_id,
@@ -392,4 +411,85 @@ def tags(project_id):
     with session_scope() as session:
         project = get_owned_project(session, project_id)
         body = {"tags": _tag_counts(session, project.id)}
+    return jsonify(body)
+
+
+# --------------------------------------------------------------------------- #
+# Export (Phase 2)
+# --------------------------------------------------------------------------- #
+EXPORT_FORMAT = "retro.project.v1"
+CSV_COLUMNS = (
+    "number", "type", "sentiment", "status", "priority", "tags", "title", "message",
+    "reporter_email", "page_url", "app_version", "source", "created_at",
+)
+
+
+@bp.get("/<project_id>/export")
+@public_limit
+@require_auth_or_api_key
+@require_scope("feedback:read")
+@require_scope("board:read")
+def export_project(project_id):
+    """Portable snapshot: ``retro.project.v1`` JSON (feedback with notes,
+    roadmap, changelog; no screenshot bytes) or a CSV of the feedback items."""
+    fmt = (request.args.get("format") or "json").strip().lower()
+    if fmt not in ("json", "csv"):
+        raise ApiError(400, "invalid_format", "format must be json or csv.")
+    with session_scope() as session:
+        project = get_owned_project(session, project_id)
+        items = session.scalars(
+            select(FeedbackItem)
+            .where(FeedbackItem.project_id == project.id)
+            .options(selectinload(FeedbackItem.attachment), selectinload(FeedbackItem.notes).selectinload(FeedbackNote.author))
+            .order_by(FeedbackItem.number)
+        ).all()
+        if fmt == "csv":
+            buf = io.StringIO()
+            writer = csv.writer(buf)
+            writer.writerow(CSV_COLUMNS)
+            for it in items:
+                writer.writerow([
+                    it.number, it.type, it.sentiment or "", it.status, it.priority, " ".join(it.tags or []),
+                    it.title, it.message, it.reporter_email or "", it.page_url or "", it.app_version or "",
+                    it.source, iso(it.created_at),
+                ])
+            data = buf.getvalue()
+            key = project.key
+            response = Response(data, mimetype="text/csv")
+            response.headers["Content-Disposition"] = f'attachment; filename="{key}-feedback.csv"'
+            return response
+
+        roadmap = session.scalars(
+            select(RoadmapItem).where(RoadmapItem.project_id == project.id).order_by(RoadmapItem.status, RoadmapItem.position)
+        ).all()
+        linked = dict(
+            session.execute(
+                select(FeedbackItem.roadmap_item_id, func.count(FeedbackItem.id))
+                .where(FeedbackItem.project_id == project.id, FeedbackItem.roadmap_item_id.is_not(None))
+                .group_by(FeedbackItem.roadmap_item_id)
+            ).all()
+        )
+        changelog = session.scalars(
+            select(ChangelogEntry).where(ChangelogEntry.project_id == project.id).order_by(ChangelogEntry.created_at)
+        ).all()
+
+        def _feedback(it):
+            body = serialize_feedback(it, with_notes=True)
+            for note in body["notes"]:
+                if note.get("author"):
+                    note["author"] = {"email": note["author"].get("email"), "label": note["author"].get("label")}
+            body.pop("similar", None)
+            return body
+
+        body = {
+            "format": EXPORT_FORMAT,
+            "exported_at": iso(datetime.now(timezone.utc)),
+            "project": {
+                "key": project.key, "name": project.name, "description": project.description, "url": project.url,
+                "board_slug": project.board_slug, "types_enabled": list(project.types_enabled or []),
+            },
+            "feedback": [_feedback(it) for it in items],
+            "roadmap": [serialize_roadmap_item(r, linked.get(r.id, 0)) for r in roadmap],
+            "changelog": [serialize_changelog_entry(e) for e in changelog],
+        }
     return jsonify(body)

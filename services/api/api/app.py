@@ -62,12 +62,16 @@ def create_app() -> Flask:
     from .blueprints.ingest import bp as ingest_bp
     from .blueprints.projects import bp as projects_bp
     from .blueprints.roadmap import bp as roadmap_bp
+    from .blueprints.views import bp as views_bp
+    from .blueprints.webhooks import bp as webhooks_bp
     from .features import bp as features_bp
 
     app.register_blueprint(auth_bp, url_prefix="/api/auth")
     app.register_blueprint(projects_bp, url_prefix="/api/projects")
     app.register_blueprint(feedback_bp, url_prefix="/api/projects/<project_id>/feedback")
     app.register_blueprint(roadmap_bp, url_prefix="/api/projects/<project_id>/roadmap")
+    app.register_blueprint(views_bp, url_prefix="/api/projects/<project_id>/views")
+    app.register_blueprint(webhooks_bp, url_prefix="/api/projects/<project_id>/webhooks")
     app.register_blueprint(changelog_bp, url_prefix="/api/projects/<project_id>/changelog")
     app.register_blueprint(ingest_bp, url_prefix="/api/ingest")
     app.register_blueprint(boards_bp, url_prefix="/api/boards")

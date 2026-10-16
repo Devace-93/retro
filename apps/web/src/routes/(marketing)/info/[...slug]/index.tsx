@@ -37,6 +37,33 @@ const FORM_SNIPPET = `<form method="post" action="${APP_URL}/api/ingest/feedback
   <button>Send</button>
 </form>`;
 
+const WEBHOOK_PAYLOAD = `{
+  "id": "6f1c…",                       // delivery id (X-Retro-Delivery)
+  "event": "feedback.created",
+  "created_at": "2026-10-16T09:12:00Z",
+  "project": { "id": "…", "key": "my-app", "name": "My app" },
+  "data": { "number": 42, "type": "bug", "title": "Export does nothing", "status": "new", "previous_status": null, … }
+}`;
+const WEBHOOK_VERIFY_NODE = `import { createHmac, timingSafeEqual } from "node:crypto";
+
+app.post("/hooks/retro", express.raw({ type: "*/*" }), (req, res) => {
+  const expected = "sha256=" + createHmac("sha256", process.env.RETRO_WEBHOOK_SECRET).update(req.body).digest("hex");
+  const given = req.get("X-Retro-Signature") ?? "";
+  if (given.length !== expected.length || !timingSafeEqual(Buffer.from(given), Buffer.from(expected))) return res.sendStatus(401);
+  const event = JSON.parse(req.body);          // use event.id to de-duplicate retries
+  res.sendStatus(204);
+});`;
+const WEBHOOK_VERIFY_PY = `import hmac, hashlib
+from flask import request, abort
+
+@app.post("/hooks/retro")
+def retro_hook():
+    expected = "sha256=" + hmac.new(SECRET.encode(), request.get_data(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(request.headers.get("X-Retro-Signature", ""), expected):
+        abort(401)
+    event = request.get_json()               # event["id"] de-duplicates retries
+    return "", 204`;
+
 interface Endpoint {
   method: string;
   path: string;
@@ -101,6 +128,34 @@ const SECTIONS: { title: CatalogKey; body: CatalogKey; endpoints: Endpoint[]; sn
       { method: "POST", path: "/boards/:slug/items/:rid/vote", scope: "—", notes: "{voter_id} · idempotent" },
       { method: "DELETE", path: "/boards/:slug/items/:rid/vote", scope: "—", notes: "{voter_id}" },
       { method: "POST", path: "/boards/:slug/feedback", scope: "—", notes: "same body as ingest, type defaults to feature" },
+    ],
+  },
+  {
+    title: "docs.webhooksTitle",
+    body: "docs.webhooksBody",
+    endpoints: [
+      { method: "GET", path: "/projects/:id/webhooks", scope: "projects:read" },
+      { method: "POST", path: "/projects/:id/webhooks", scope: "projects:write", notes: "{url (https), events?, description?} → secret shown once · 402 webhooks" },
+      { method: "PATCH", path: "/projects/:id/webhooks/:wid", scope: "projects:write", notes: "{url?, events?, description?, enabled?}" },
+      { method: "POST", path: "/projects/:id/webhooks/:wid/test", scope: "projects:write", notes: "queues a ping" },
+      { method: "GET", path: "/projects/:id/webhooks/:wid/deliveries?limit=", scope: "projects:read" },
+      { method: "DELETE", path: "/projects/:id/webhooks/:wid", scope: "projects:delete" },
+    ],
+  },
+  {
+    title: "docs.duplicatesTitle",
+    body: "docs.duplicatesBody",
+    endpoints: [
+      { method: "GET", path: "/projects/:id/feedback?duplicates=hide", scope: "feedback:read", notes: "hide merged items" },
+      { method: "POST", path: "/projects/:id/feedback/:item/merge", scope: "feedback:write", notes: "{into} → item becomes a declined duplicate" },
+      { method: "POST", path: "/projects/:id/feedback/:item/reply", scope: "feedback:write", notes: "{body} → emails the reporter · 400 no_reporter_email · 503 mail_disabled" },
+      { method: "GET", path: "/projects/:id/views", scope: "feedback:read" },
+      { method: "POST", path: "/projects/:id/views", scope: "feedback:write", notes: "{name, filters} · max 20" },
+      { method: "PATCH", path: "/projects/:id/views/:vid", scope: "feedback:write" },
+      { method: "DELETE", path: "/projects/:id/views/:vid", scope: "feedback:write" },
+      { method: "GET", path: "/projects/:id/export?format=json|csv", scope: "feedback:read + board:read", notes: "retro.project.v1 or CSV; no screenshots" },
+      { method: "GET", path: "/account/notifications", scope: "usage:read" },
+      { method: "PATCH", path: "/account/notifications", scope: "projects:write", notes: "{email_new_feedback?, email_digest_minutes: 0|15|60|1440}" },
     ],
   },
 ];
@@ -263,6 +318,36 @@ export default component$(() => {
             {s.snippet && <Code code={s.snippet} />}
           </section>
         ))}
+
+        {/* Webhook payload + signature */}
+        <section class="mt-8 card p-6" id="webhooks">
+          <h2 class="text-xl font-semibold text-slate-900">{tr(i18n, "docs.webhooksTitle")} · payload</h2>
+          <p class="mt-2 text-sm text-slate-600">{tr(i18n, "docs.webhooksEvents")}</p>
+          <Code code={WEBHOOK_PAYLOAD} />
+          <p class="mt-3 text-sm text-slate-600">{tr(i18n, "docs.webhooksHeaders")}</p>
+          <p class="mt-2 text-sm text-slate-600">{tr(i18n, "docs.webhooksRetry")}</p>
+          <h3 class="mt-5 font-semibold text-slate-900">{tr(i18n, "docs.webhooksVerify")}</h3>
+          <div class="mt-2 text-xs uppercase tracking-wide text-slate-500">Node</div>
+          <Code code={WEBHOOK_VERIFY_NODE} />
+          <div class="mt-4 text-xs uppercase tracking-wide text-slate-500">Python</div>
+          <Code code={WEBHOOK_VERIFY_PY} />
+        </section>
+
+        <section class="mt-8 card p-6" id="export">
+          <h2 class="text-xl font-semibold text-slate-900">{tr(i18n, "docs.exportTitle")}</h2>
+          <p class="mt-2 text-sm text-slate-600">{tr(i18n, "docs.exportBody")}</p>
+          <Code code={`curl -H "X-API-Key: retro_live_…" "${APP_URL}/api/projects/$PROJECT/export?format=csv" -o feedback.csv`} />
+        </section>
+
+        <section class="mt-8 card p-6" id="turnstile">
+          <h2 class="text-xl font-semibold text-slate-900">{tr(i18n, "docs.turnstileTitle")}</h2>
+          <p class="mt-2 text-sm text-slate-600">{tr(i18n, "docs.turnstileBody")}</p>
+        </section>
+
+        <section class="mt-8 card p-6" id="notifications">
+          <h2 class="text-xl font-semibold text-slate-900">{tr(i18n, "docs.notifyTitle")}</h2>
+          <p class="mt-2 text-sm text-slate-600">{tr(i18n, "docs.notifyBody")}</p>
+        </section>
 
         <section class="mt-8 card p-6">
           <h2 class="text-xl font-semibold text-slate-900">{tr(i18n, "docs.errorsTitle")}</h2>

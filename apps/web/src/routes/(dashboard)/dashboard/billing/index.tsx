@@ -257,6 +257,7 @@ export default component$(() => {
                 <li>{tr(i18n, "billing.featFeedback", { n: fmtLimit(plan.feedback_per_month, i18n) })}</li>
                 <li>{tr(i18n, "billing.featStorage", { n: plan.attachment_storage_mb < 0 ? fmtLimit(-1, i18n) : fmtStorage(plan.attachment_storage_mb) })}</li>
                 <li>{tr(i18n, "billing.featRoadmap", { n: fmtLimit(plan.roadmap_items_per_project, i18n) })}</li>
+                {plan.webhooks_per_project !== undefined && <li>{tr(i18n, "billing.featWebhooks", { n: fmtLimit(plan.webhooks_per_project, i18n) })}</li>}
                 <li>{tr(i18n, "billing.featRetention", { n: fmtRetention(plan.audit_retention_days, i18n) })}</li>
                 <li>{tr(i18n, "billing.featUsers", { n: fmtLimit(plan.max_users, i18n) })}</li>
               </ul>

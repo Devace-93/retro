@@ -22,7 +22,8 @@ third docker compose project without its own Caddy, and the 3m4 Caddy routes
    `IP_HASH_SECRET`, PostHog keys (`POSTHOG_API_KEY`, `POSTHOG_PERSONAL_API_KEY`,
    `VITE_POSTHOG_KEY`; flags are prefixed `retro-` in the shared PostHog
    project), RevenueCat keys when billing is switched on, a fresh Postgres
-   password (also in `DATABASE_URL`). Mail: `MAIL_ENABLED=true`, `SMTP_URL`
+   password: set `POSTGRES_PASSWORD` (read by the postgres service through
+   `--env-file ../.env`) and use the same value in `DATABASE_URL`. Mail: `MAIL_ENABLED=true`, `SMTP_URL`
    (`smtp://user:pass@host:587?starttls=1` or `smtps://…:465`) and `MAIL_FROM`
    (`retro <no-reply@3m4.net>`; the sending domain needs SPF/DKIM for the
    provider you pick). Leave `MAIL_ENABLED=false` to run without mail: replies
@@ -30,7 +31,7 @@ third docker compose project without its own Caddy, and the 3m4 Caddy routes
 3. **Start**
    ```sh
    cd /opt/retro/deploy
-   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+   docker compose --env-file ../.env -f docker-compose.yml -f docker-compose.prod.yml up -d --build
    ```
    Container names are stable (`retro-api-1`, `retro-web-1`, `retro-mcp-1`,
    `retro-worker-1`): compose project `retro`, one replica each. The edge
