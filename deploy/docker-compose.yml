@@ -5,7 +5,7 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: retro
-      POSTGRES_PASSWORD: retro
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-retro}
       POSTGRES_DB: retro
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -45,6 +45,17 @@ services:
       redis: { condition: service_healthy }
       migrate: { condition: service_completed_successfully }
     expose: ["5000"]
+    restart: unless-stopped
+
+  # Outbox worker: delivers mail (digests, replies) and webhooks written to the
+  # `outbox` table by the API, with retries. Same image as the API.
+  worker:
+    build: { context: .., dockerfile: services/api/Dockerfile }
+    command: ["python", "-m", "dbcore.worker"]
+    env_file: ../.env
+    depends_on:
+      postgres: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
     restart: unless-stopped
 
   web:
