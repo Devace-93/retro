@@ -1,6 +1,6 @@
 # retro — User feedback — Project Plan
 
-> Status: Phase 1 (MVP) in progress. Last updated: 2026-10-15.
+> Status: Phase 1 (MVP) built and verified locally; Phase 2 in progress. Last updated: 2026-10-15.
 
 Owner: Enrique Magallon Alvarez. License: **MIT** (open-source core, self-hostable).
 
@@ -37,9 +37,10 @@ gives each project an inbox, a public roadmap and a changelog.
   changelog with a public board (votes), widget (`/widget.js`, screenshot
   capture), API keys + RBAC + audit, MCP server, dashboard, marketing pages,
   i18n, theme, e2e suite, deploy.
-- **Phase 2:** email notifications (new feedback digest), reply to reporter,
-  Cloudflare Turnstile option, webhooks on new feedback / status change, export
-  (`retro.project.v1`), saved views, duplicate detection.
+- **Phase 2 (in progress):** outbox worker, email notifications (digest), reply
+  to reporter, Cloudflare Turnstile option, webhooks with HMAC signatures and
+  deliveries log, export (`retro.project.v1` JSON + CSV), saved views, duplicate
+  detection (pg_trgm) with merge. Spec: CONTRACT.md → "Phase 2 addendum".
 - **Phase 3:** billing on (RevenueCat), team members and invitations,
   dogfooding (retro's own widget on every 3m4 app, including retro).
 

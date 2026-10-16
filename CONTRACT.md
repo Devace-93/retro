@@ -479,3 +479,149 @@ Install options (documented on `/info/docs` and in project settings):
 - Public board pages are SSR'd from `GET /api/boards/:slug` (API_INTERNAL_URL),
   carry OpenGraph tags and follow the viewer's theme/lang like the rest.
 - Brand colour: Tailwind **emerald** scale as `primary` (3m4 blue, exp violet, bubbles orange).
+
+---
+
+# Phase 2 addendum
+
+Everything above stays valid. Phase 2 adds notifications, replies, webhooks,
+spam protection, export, saved views and duplicate detection.
+
+## Mail
+
+Outbound mail is optional. `MAIL_ENABLED=true` plus `SMTP_URL`
+(`smtp://user:pass@host:587?starttls=1` or `smtps://…:465`) and `MAIL_FROM`
+(`retro <no-reply@3m4.net>`) switch it on; when disabled every mail is logged
+at INFO and marked `skipped`. Templates are plain text + minimal HTML, English
+only in Phase 2 (the account's dashboard locale is recorded for later).
+
+## Outbox worker
+
+New compose service `worker` (`python -m dbcore.worker`, same image as `api`):
+polls the `outbox` table every 10 s and delivers one job at a time. Jobs:
+`email` (notification digest, reply), `webhook` (one delivery). Retries with
+exponential backoff (1 min → 2 h, max 8 attempts); terminal failures are kept
+for 7 days with the last error. Idempotent: a job row is claimed with
+`SELECT … FOR UPDATE SKIP LOCKED`.
+
+Table `outbox`: `id, kind, account_id, project_id, payload JSONB, attempts,
+next_attempt_at, status (pending|sent|failed|skipped), last_error, created_at,
+sent_at`.
+
+## Notifications (account-level settings)
+
+- `GET  /account/notifications` → `{ email_new_feedback: bool, email_digest_minutes: int, email: "owner@…" }`
+- `PATCH /account/notifications` `{email_new_feedback?, email_digest_minutes?}` → same. `email_digest_minutes` ∈ 0 (instant, one mail per item) | 15 | 60 | 1440. Default: ON, 60.
+
+Behaviour: every accepted submission adds the item to the project's pending
+digest. The worker sends one mail per (account, project) at most every
+`email_digest_minutes`, listing the new items (number, type, title, page_url,
+link to the inbox). Audit none. Mail goes to the account owner's email
+(Membership role `owner`).
+
+## Reply to the reporter
+
+- `POST /projects/:id/feedback/:item/reply` `{body}` → Note (201, `kind: "reply"`) — `feedback:write`.
+  Requires `reporter_email` (400 `no_reporter_email`) and `MAIL_ENABLED`
+  (503 `mail_disabled`). Queues an `email` job: subject `Re: #<number> <title>`,
+  from `MAIL_FROM`, `Reply-To` = the owner's email, body = the reply + a quote of
+  the original message. Audit `feedback.reply`.
+- Notes gain `kind` ∈ `note` (default) | `reply` and `delivery` for replies
+  (`pending` | `sent` | `failed`, mirrored from the outbox job).
+
+## Webhooks (per project)
+
+- `GET    /projects/:id/webhooks` → `[Webhook]` — `projects:read`
+- `POST   /projects/:id/webhooks` `{url, events?, description?}` → Webhook with one-time `secret` (201) — `projects:write`. `url` must be `https://` (http allowed only when `APP_BASE_URL` is not https, i.e. local dev). Max 5 per project (402 `which: "webhooks"`, limit `webhooks_per_project` in plan_limits: free 2, pro 5, team 20).
+- `PATCH  /projects/:id/webhooks/:wid` `{url?, events?, description?, enabled?}` → Webhook — `projects:write`
+- `DELETE /projects/:id/webhooks/:wid` → 204 — `projects:delete`
+- `POST   /projects/:id/webhooks/:wid/test` → `{delivery_id}` (202) — `projects:write`. Sends a `ping` event.
+- `GET    /projects/:id/webhooks/:wid/deliveries?limit=20` → `[Delivery]` — `projects:read`
+
+Events: `feedback.created`, `feedback.status_changed`, `roadmap.status_changed`,
+`changelog.published`, `ping`. Default = all. Payload:
+```json
+{ "id": "delivery uuid", "event": "feedback.created", "created_at": "…", "project": { "id", "key", "name" }, "data": { …FeedbackItem without notes / RoadmapItem / ChangelogEntry… , "previous_status": "new" } }
+```
+Headers: `Content-Type: application/json`, `X-Retro-Event`, `X-Retro-Delivery`,
+`X-Retro-Signature: sha256=<hex HMAC of the raw body with the secret>`,
+`User-Agent: retro-webhooks/1`. 10 s timeout; 2xx = delivered. Retries per the
+outbox rules. `Webhook` = `{ id, url, events, description, enabled, secret_prefix, last_delivery_at, last_status, created_at }`;
+`Delivery` = `{ id, event, status (pending|delivered|failed), attempts, response_code, last_error, created_at, delivered_at }`.
+Audit `webhook.create|update|delete`.
+
+## Spam protection: Cloudflare Turnstile (optional, per project)
+
+- Project gains `turnstile_site_key` (returned) and `turnstile_secret`
+  (write-only; `PATCH /projects/:id` accepts it, responses expose
+  `turnstile_enabled: bool` only). Clearing both disables it.
+- `WidgetConfig` gains `turnstile_site_key` (string | null).
+- When enabled, `POST /ingest/feedback` and `POST /boards/:slug/feedback` require
+  `turnstile_token`; the API verifies it with Cloudflare's siteverify (5 s
+  timeout). Missing/invalid → 400 `captcha_failed`. Verification outage →
+  accept and tag the item `unverified` (never lose feedback).
+- Widget: when `turnstile_site_key` is set, it loads
+  `https://challenges.cloudflare.com/turnstile/v0/api.js` lazily on panel open,
+  renders an invisible/managed challenge above the Send button and sends the
+  token. Board page does the same.
+
+## Export
+
+- `GET /projects/:id/export?format=json|csv` — `feedback:read` + `board:read`.
+  - `json` → `retro.project.v1`:
+    ```json
+    { "format": "retro.project.v1", "exported_at": "…", "project": { "key", "name", "description", "url", "board_slug", "types_enabled" }, "feedback": [FeedbackItem without notes.author.id, with notes], "roadmap": [RoadmapItem], "changelog": [ChangelogEntry] }
+    ```
+    Screenshots are not included (a `has_screenshot` flag remains).
+  - `csv` → `text/csv` of the feedback items: `number,type,sentiment,status,priority,tags,title,message,reporter_email,page_url,app_version,source,created_at`. `Content-Disposition: attachment; filename="<key>-feedback.csv"`.
+- Dashboard: settings page gets "Export JSON" / "Export CSV" buttons.
+
+## Saved views (per project)
+
+- `GET    /projects/:id/views` → `[SavedView]` — `feedback:read`
+- `POST   /projects/:id/views` `{name, filters}` → SavedView (201) — `feedback:write`. Max 20 (400 `too_many_views`).
+- `PATCH  /projects/:id/views/:vid` `{name?, filters?, position?}` → SavedView — `feedback:write`
+- `DELETE /projects/:id/views/:vid` → 204 — `feedback:write`
+
+`SavedView` = `{ id, name, filters: { q?, type?, status?, sentiment?, priority?, tag?, has_screenshot?, sort? }, position, created_at }`.
+Dashboard: a "Views" strip above the inbox filters (click applies, "Save current filters as view", rename, delete). Seeded defaults are **not** stored: "New", "Bugs", "Features", "Positive", "Negative" are virtual views rendered first.
+
+## Duplicate detection
+
+- Postgres extension `pg_trgm` (migration `0002` creates it + a GIN index on
+  `feedback_items.title` and `message`).
+- On every accepted submission the API computes
+  `similarity(message, other.message)` against the project's items of the
+  last 90 days (same `type`, not `declined`), keeps the top 3 with similarity
+  ≥ 0.45 and stores them as `similar_ids` on the new item (JSONB array of
+  `{id, number, similarity}`).
+- `FeedbackItem` gains `similar: [{ id, number, title, status, similarity }]`
+  (detail only) and `duplicate_of: uuid | null`.
+- `POST /projects/:id/feedback/:item/merge` `{into}` → FeedbackItem — `feedback:write`.
+  Marks the item `status: declined`, `duplicate_of: into`, copies its tags onto
+  the target, appends a system note on the target (`Merged #<n>`), and moves
+  the reporter (if any) onto the target's `watchers` list (JSONB of emails) so a
+  future reply/notification can reach everyone. Audit `feedback.merge`.
+- `GET /projects/:id/feedback?duplicates=hide` hides items with `duplicate_of`
+  set (default `show`).
+- Dashboard: the detail drawer shows "Possible duplicates" with a "Merge into
+  #n" action; merged items show a "Duplicate of #n" badge and link.
+
+## MCP additions
+
+Tools: `export_project` (feedback:read + board:read), `reply_to_reporter`
+(feedback:write), `merge_feedback` (feedback:write, needs confirmation),
+`list_saved_views` `create_saved_view` (feedback:read / feedback:write),
+`list_webhooks` `create_webhook` `test_webhook` (projects:read / write),
+`get_notification_settings` `update_notification_settings` (usage:read /
+projects:write). `get_feedback` output gains `similar` and `duplicate_of`.
+
+## Features (switches) added
+
+`webhooks`, `mail` (both default ON, self-host ON). `turnstile` is not a
+switch: it is per-project configuration.
+
+## Env additions
+
+`MAIL_ENABLED=false`, `SMTP_URL=`, `MAIL_FROM=retro <no-reply@3m4.net>`,
+`WEBHOOK_TIMEOUT_SECONDS=10`, `TURNSTILE_VERIFY_URL=https://challenges.cloudflare.com/turnstile/v0/siteverify`.
