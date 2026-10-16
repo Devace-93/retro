@@ -41,6 +41,17 @@ export const TOOL_SCOPES = {
   delete_changelog_entry: ["board:delete"],
   get_usage: ["usage:read"],
   get_audit_log: ["audit:read"],
+  // Phase 2
+  export_project: ["feedback:read", "board:read"],
+  reply_to_reporter: ["feedback:write"],
+  merge_feedback: ["feedback:write"],
+  list_saved_views: ["feedback:read"],
+  create_saved_view: ["feedback:write"],
+  list_webhooks: ["projects:read"],
+  create_webhook: ["projects:write"],
+  test_webhook: ["projects:write"],
+  get_notification_settings: ["usage:read"],
+  update_notification_settings: ["projects:write"],
 } as const satisfies Record<string, readonly Scope[]>;
 
 export type ToolName = keyof typeof TOOL_SCOPES;
@@ -53,6 +64,7 @@ export const CONFIRMED_TOOLS: readonly ToolName[] = [
   "delete_feedback",
   "delete_roadmap_item",
   "delete_changelog_entry",
+  "merge_feedback",
 ];
 
 export function hasScope(scopes: Iterable<Scope>, scope: Scope): boolean {

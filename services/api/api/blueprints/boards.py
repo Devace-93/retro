@@ -25,7 +25,7 @@ from dbcore.privacy import ip_hash
 from ..errors import ApiError
 from ..extensions import board_key_func, limiter
 from ..serializers import json_or_form_body, serialize_board, serialize_public_changelog_entry
-from .ingest import _client_ip, accept_response, fake_accept, honeypot_tripped, store_submission
+from .ingest import _client_ip, accept_response, check_turnstile, fake_accept, honeypot_tripped, store_submission
 
 bp = Blueprint("boards", __name__)
 
@@ -183,7 +183,8 @@ def board_feedback(slug):
             return fake_accept()
         try:
             sub = normalize_submission(data, project, default_type="feature")
-            item, dropped = store_submission(session, project, sub, source="board")
+            extra_tags = check_turnstile(project, data)
+            item, dropped = store_submission(session, project, sub, source="board", extra_tags=extra_tags)
         except FeedbackError as err:
             raise ApiError(400, err.code, err.message)
         session.flush()

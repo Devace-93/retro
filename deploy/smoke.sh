@@ -1,5 +1,6 @@
 #!/usr/bin/env sh
-# Smoke test for a running retro stack: health, widget headers, ingest round-trip.
+# Smoke test for a running retro stack: health, widget headers, ingest round-trip,
+# export (JSON + CSV), saved views.
 #   BASE_URL=http://localhost:8082 sh deploy/smoke.sh
 # Creates a throwaway account + project through the API, so it needs signups ON.
 set -eu
@@ -14,7 +15,7 @@ say "health"
 curl -fsS "$API/healthz" | grep -q '"ok"' && echo "  api ok"
 
 say "widget headers"
-curl -fsSI "$BASE_URL/widget.js" | tr -d '\r' | grep -iE '^(content-type|cache-control|access-control-allow-origin):' | sed 's/^/  /'
+curl -fsS -o /dev/null -D - "$BASE_URL/widget.js" | tr -d "\r" | grep -iE '^(content-type|cache-control|access-control-allow-origin):' | sed 's/^/  /'
 
 say "register + project"
 EMAIL="smoke+$(date +%s)@example.com"
@@ -37,6 +38,19 @@ curl -fsS -X POST "$API/ingest/feedback" --data-urlencode "project_key=$PUB" --d
 say "inbox"
 curl -fsS "$API/projects/$PID/feedback" -H "Authorization: Bearer $TOKEN" \
   | python3 -c 'import json,sys; d=json.load(sys.stdin); print("  %d item(s): %s" % (d["total"], ", ".join("#%d %s" % (i["number"], i["type"]) for i in d["items"])))'
+
+say "export (json + csv)"
+curl -fsS "$API/projects/$PID/export" -H "Authorization: Bearer $TOKEN" \
+  | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["format"]=="retro.project.v1", d; print("  %s: %d feedback, %d roadmap, %d changelog" % (d["format"], len(d["feedback"]), len(d["roadmap"]), len(d["changelog"])))'
+curl -fsS "$API/projects/$PID/export?format=csv" -H "Authorization: Bearer $TOKEN" | head -1 | sed 's/^/  csv header: /'
+
+say "saved views"
+VIEW=$(curl -fsS -X POST "$API/projects/$PID/views" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name":"Smoke bugs","filters":{"type":"bug"}}')
+VID=$(printf '%s' "$VIEW" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+curl -fsS "$API/projects/$PID/views" -H "Authorization: Bearer $TOKEN" \
+  | python3 -c 'import json,sys; v=json.load(sys.stdin); print("  %d view(s): %s" % (len(v), ", ".join(x["name"] for x in v)))'
+curl -fsS -X DELETE "$API/projects/$PID/views/$VID" -H "Authorization: Bearer $TOKEN" && echo "  view deleted"
 
 say "cleanup"
 curl -fsS -X DELETE "$API/projects/$PID" -H "Authorization: Bearer $TOKEN" && echo "  project deleted"

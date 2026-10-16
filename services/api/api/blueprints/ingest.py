@@ -12,6 +12,13 @@ dropped (not rejected) when the account is over its storage cap, and ignored
 when screenshots are switched off for the project or globally.
 
 ``store_submission`` is shared with the public board (``blueprints.boards``).
+
+Phase 2: when the project has Cloudflare Turnstile configured the submission
+must carry a valid ``turnstile_token`` (a verification *outage* accepts the
+item and tags it ``unverified``); every accepted item gets its possible
+duplicates computed (``similar_ids``), joins the owner's digest mail and is
+emitted to the project's webhooks (``feedback.created``) — all in the same
+transaction, through the outbox.
 """
 from __future__ import annotations
 
@@ -23,6 +30,8 @@ from sqlalchemy.orm import Session
 
 from dbcore.config import config
 from dbcore.db import session_scope
+from dbcore.duplicates import find_similar
+from dbcore.events import emit
 from dbcore.feedback import (
     MAX_USER_AGENT,
     SOURCES,
@@ -34,16 +43,18 @@ from dbcore.feedback import (
 )
 from dbcore.feature_flags import is_enabled, resolve_all
 from dbcore.models import Account, Attachment, FeedbackItem, Project
+from dbcore.outbox import enqueue_digest_item
 from dbcore.plans import effective_plan_limits
 from dbcore.posthog_client import capture
 from dbcore.privacy import ip_hash
+from dbcore.turnstile import verify as verify_turnstile
 from dbcore.usage import meter_feedback, storage_available
 
 from ..auth_utils import require_project_key
 from ..errors import ApiError
 from ..extensions import ingest_key_func, limiter
 from ..features import require_feature
-from ..serializers import board_url, json_or_form_body, serialize_widget_config
+from ..serializers import board_url, json_or_form_body, serialize_feedback, serialize_widget_config
 
 bp = Blueprint("ingest", __name__)
 
@@ -75,10 +86,28 @@ def fake_accept() -> tuple:
     ), 201
 
 
-def store_submission(session: Session, project: Project, sub: Submission, *, source: str) -> tuple[FeedbackItem, bool]:
-    """Persist a validated submission (item + optional screenshot) and meter
-    it. Returns ``(item, screenshot_dropped)``. Runs inside the caller's
-    transaction so the numbering lock covers the whole insert."""
+def check_turnstile(project: Project, data: dict) -> list[str]:
+    """Enforce Turnstile when the project configured it. Returns the tags to
+    add to the item (``["unverified"]`` when Cloudflare was unreachable)."""
+    if not (project.turnstile_site_key and project.turnstile_secret):
+        return []
+    token = (data.get("turnstile_token") or "").strip() or None
+    result = verify_turnstile(project.turnstile_secret, token, _client_ip())
+    if result is None:
+        return ["unverified"]
+    if not result:
+        raise ApiError(400, "captcha_failed", "The anti-spam challenge failed; please try again.")
+    return []
+
+
+def store_submission(
+    session: Session, project: Project, sub: Submission, *, source: str, extra_tags: list[str] | None = None
+) -> tuple[FeedbackItem, bool]:
+    """Persist a validated submission (item + optional screenshot), meter it,
+    compute its possible duplicates, queue the digest mail and emit the
+    ``feedback.created`` webhook event. Returns ``(item, screenshot_dropped)``.
+    Runs inside the caller's transaction so the numbering lock covers the whole
+    insert and the outbox rows commit with the item."""
     account = session.get(Account, project.account_id)
     limits = effective_plan_limits(account.plan, str(account.id))
 
@@ -108,6 +137,8 @@ def store_submission(session: Session, project: Project, sub: Submission, *, sou
         metadata_=sub.metadata,
         source=source,
         ip_hash=ip_hash(_client_ip()),
+        tags=list(extra_tags or []),
+        similar_ids=find_similar(session, project.id, sub.type, sub.message),
     )
     session.add(item)
     session.flush()
@@ -138,6 +169,10 @@ def store_submission(session: Session, project: Project, sub: Submission, *, sou
         {"type": item.type, "sentiment": item.sentiment, "has_screenshot": screenshot is not None, "source": source},
         groups={"account": str(account.id)},
     )
+    # Side effects ride along in this transaction (outbox pattern).
+    enqueue_digest_item(session, account, project, item)
+    session.refresh(item)
+    emit(session, project, "feedback.created", serialize_feedback(item))
     return item, screenshot_dropped
 
 
@@ -183,7 +218,8 @@ def ingest_feedback():
             raise ApiError(401, "invalid_project_key", "Missing or invalid project key.")
         try:
             sub = normalize_submission(data, project)
-            item, dropped = store_submission(session, project, sub, source=_source("api"))
+            extra_tags = check_turnstile(project, data)
+            item, dropped = store_submission(session, project, sub, source=_source("api"), extra_tags=extra_tags)
         except FeedbackError as err:
             raise ApiError(400, err.code, err.message)
         session.flush()

@@ -209,3 +209,106 @@ export async function pollUntil<T>(
 /** A 1×1 PNG as a data URL, for screenshot upload tests. */
 export const TINY_PNG =
   "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+
+// --------------------------------------------------------------------------- //
+// Phase 2 helpers (CONTRACT.md → "Phase 2 addendum")
+// --------------------------------------------------------------------------- //
+
+export interface FeedbackDetail extends FeedbackItem {
+  similar?: { id: string; number: number; title: string; status: string; similarity: number }[];
+  duplicate_of?: string | null;
+  tags?: string[];
+  notes?: { id: string; body: string; kind?: string; delivery?: string; created_at: string }[];
+}
+
+export interface Webhook {
+  id: string;
+  url: string;
+  events: string[];
+  description?: string | null;
+  enabled: boolean;
+  secret_prefix: string;
+  /** Full secret; present ONLY on create. */
+  secret?: string;
+  last_delivery_at?: string | null;
+  last_status?: string | null;
+  created_at: string;
+}
+
+export interface Delivery {
+  id: string;
+  event: string;
+  status: "pending" | "delivered" | "failed";
+  attempts: number;
+  response_code?: number | null;
+  last_error?: string | null;
+  created_at: string;
+  delivered_at?: string | null;
+}
+
+export interface SavedView {
+  id: string;
+  name: string;
+  filters: Record<string, string>;
+  position: number;
+  created_at: string;
+}
+
+/** GET /api/projects/:id/feedback/:item (detail, with notes / similar / duplicate_of). */
+export async function getFeedback(
+  request: APIRequestContext,
+  account: Account,
+  projectId: string,
+  item: string | number,
+): Promise<FeedbackDetail> {
+  const res = await request.get(`${API_URL}/projects/${projectId}/feedback/${item}`, {
+    headers: jwtHeaders(account),
+  });
+  expect(res.status(), `get feedback ${item}: ${await res.text()}`).toBe(200);
+  return res.json();
+}
+
+/** POST /api/projects/:id/webhooks → Webhook with its one-time secret. */
+export async function createWebhook(
+  request: APIRequestContext,
+  account: Account,
+  projectId: string,
+  body: { url: string; events?: string[]; description?: string },
+): Promise<Webhook> {
+  const res = await request.post(`${API_URL}/projects/${projectId}/webhooks`, {
+    headers: jwtHeaders(account),
+    data: body,
+  });
+  expect(res.status(), `create webhook: ${await res.text()}`).toBe(201);
+  return res.json();
+}
+
+/** GET /api/projects/:id/webhooks/:wid/deliveries. */
+export async function listDeliveries(
+  request: APIRequestContext,
+  account: Account,
+  projectId: string,
+  webhookId: string,
+  limit = 20,
+): Promise<Delivery[]> {
+  const res = await request.get(`${API_URL}/projects/${projectId}/webhooks/${webhookId}/deliveries?limit=${limit}`, {
+    headers: jwtHeaders(account),
+  });
+  expect(res.status(), `list deliveries: ${await res.text()}`).toBe(200);
+  return res.json();
+}
+
+/**
+ * Host reachable FROM the api container. The webhook sink runs on the host
+ * machine, so the API (inside docker) must dial out to the docker bridge
+ * gateway (`172.17.0.1` on a default Linux install) or `host.docker.internal`
+ * (Docker Desktop / compose with `extra_hosts`). Override with
+ * E2E_WEBHOOK_SINK_HOST.
+ */
+export const WEBHOOK_SINK_HOST = process.env.E2E_WEBHOOK_SINK_HOST || "172.17.0.1";
+
+/** Parse a `text/csv` body into rows (good enough for our own export; no quoted newlines). */
+export function parseCsvHeader(csv: string): string[] {
+  const first = csv.split(/\r?\n/)[0] ?? "";
+  return first.split(",").map((c) => c.replace(/^"|"$/g, ""));
+}

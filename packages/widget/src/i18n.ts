@@ -25,7 +25,8 @@ export type Key =
   | "close"
   | "back"
   | "error"
-  | "screenshotError";
+  | "screenshotError"
+  | "captchaError";
 
 export type Strings = Record<Key, string>;
 
@@ -62,6 +63,7 @@ const en: Strings = {
   back: "Back",
   error: "We couldn't send your feedback. Please try again.",
   screenshotError: "Screenshot capture failed. You can attach an image file instead.",
+  captchaError: "Verification failed. Please try again.",
 };
 
 const es: Strings = {
@@ -86,6 +88,7 @@ const es: Strings = {
   back: "Atrás",
   error: "No pudimos enviar tu comentario. Inténtalo de nuevo.",
   screenshotError: "No se pudo capturar la pantalla. Puedes adjuntar una imagen.",
+  captchaError: "La verificación falló. Inténtalo de nuevo.",
 };
 
 const fr: Strings = {
@@ -99,6 +102,7 @@ const fr: Strings = {
   roadmap: "Voir la feuille de route", close: "Fermer", back: "Retour",
   error: "Impossible d'envoyer votre avis. Veuillez réessayer.",
   screenshotError: "La capture a échoué. Vous pouvez joindre une image.",
+  captchaError: "La vérification a échoué. Veuillez réessayer.",
 };
 
 const de: Strings = {
@@ -112,6 +116,7 @@ const de: Strings = {
   roadmap: "Roadmap ansehen", close: "Schließen", back: "Zurück",
   error: "Dein Feedback konnte nicht gesendet werden. Bitte versuche es erneut.",
   screenshotError: "Screenshot fehlgeschlagen. Du kannst stattdessen ein Bild anhängen.",
+  captchaError: "Die Überprüfung ist fehlgeschlagen. Bitte versuche es erneut.",
 };
 
 const it: Strings = {
@@ -125,6 +130,7 @@ const it: Strings = {
   roadmap: "Vedi la roadmap", close: "Chiudi", back: "Indietro",
   error: "Non siamo riusciti a inviare il feedback. Riprova.",
   screenshotError: "Cattura schermo non riuscita. Puoi allegare un'immagine.",
+  captchaError: "Verifica non riuscita. Riprova.",
 };
 
 const pt: Strings = {
@@ -138,6 +144,7 @@ const pt: Strings = {
   roadmap: "Ver o roadmap", close: "Fechar", back: "Voltar",
   error: "Não foi possível enviar o feedback. Tente novamente.",
   screenshotError: "A captura falhou. Você pode anexar uma imagem.",
+  captchaError: "A verificação falhou. Tente novamente.",
 };
 const ptPT: Partial<Strings> = {
   intro: "O que quer dizer-nos?", messagePlaceholder: "Conte-nos o que aconteceu ou o que gostaria…",
@@ -155,6 +162,7 @@ const nl: Strings = {
   roadmap: "Bekijk de roadmap", close: "Sluiten", back: "Terug",
   error: "Je feedback kon niet worden verstuurd. Probeer het opnieuw.",
   screenshotError: "Screenshot mislukt. Je kunt ook een afbeelding toevoegen.",
+  captchaError: "Verificatie mislukt. Probeer het opnieuw.",
 };
 
 const sv: Strings = {
@@ -168,6 +176,7 @@ const sv: Strings = {
   roadmap: "Se färdplanen", close: "Stäng", back: "Tillbaka",
   error: "Det gick inte att skicka din feedback. Försök igen.",
   screenshotError: "Skärmdumpen misslyckades. Du kan bifoga en bild i stället.",
+  captchaError: "Verifieringen misslyckades. Försök igen.",
 };
 
 const pl: Strings = {
@@ -181,6 +190,7 @@ const pl: Strings = {
   roadmap: "Zobacz plan rozwoju", close: "Zamknij", back: "Wstecz",
   error: "Nie udało się wysłać opinii. Spróbuj ponownie.",
   screenshotError: "Zrzut ekranu nie powiódł się. Możesz dołączyć obraz.",
+  captchaError: "Weryfikacja nie powiodła się. Spróbuj ponownie.",
 };
 
 const cs: Strings = {
@@ -194,6 +204,7 @@ const cs: Strings = {
   roadmap: "Zobrazit plán", close: "Zavřít", back: "Zpět",
   error: "Zpětnou vazbu se nepodařilo odeslat. Zkuste to znovu.",
   screenshotError: "Snímek obrazovky se nezdařil. Můžete přiložit obrázek.",
+  captchaError: "Ověření se nezdařilo. Zkuste to znovu.",
 };
 
 const ro: Strings = {
@@ -207,6 +218,7 @@ const ro: Strings = {
   roadmap: "Vezi planul", close: "Închide", back: "Înapoi",
   error: "Nu am putut trimite feedbackul. Încearcă din nou.",
   screenshotError: "Captura a eșuat. Poți atașa o imagine.",
+  captchaError: "Verificarea a eșuat. Încearcă din nou.",
 };
 
 const el: Strings = {
@@ -220,6 +232,7 @@ const el: Strings = {
   roadmap: "Δείτε το roadmap", close: "Κλείσιμο", back: "Πίσω",
   error: "Δεν ήταν δυνατή η αποστολή. Δοκιμάστε ξανά.",
   screenshotError: "Η λήψη απέτυχε. Μπορείτε να επισυνάψετε εικόνα.",
+  captchaError: "Η επαλήθευση απέτυχε. Δοκιμάστε ξανά.",
 };
 
 const uk: Strings = {
@@ -233,6 +246,7 @@ const uk: Strings = {
   roadmap: "Переглянути план", close: "Закрити", back: "Назад",
   error: "Не вдалося надіслати відгук. Спробуйте ще раз.",
   screenshotError: "Не вдалося зробити знімок. Ви можете додати зображення.",
+  captchaError: "Перевірка не вдалася. Спробуйте ще раз.",
 };
 
 const ru: Strings = {
@@ -246,6 +260,7 @@ const ru: Strings = {
   roadmap: "Посмотреть план", close: "Закрыть", back: "Назад",
   error: "Не удалось отправить отзыв. Попробуйте ещё раз.",
   screenshotError: "Не удалось сделать скриншот. Вы можете прикрепить изображение.",
+  captchaError: "Проверка не пройдена. Попробуйте ещё раз.",
 };
 
 const tr: Strings = {
@@ -259,6 +274,7 @@ const tr: Strings = {
   roadmap: "Yol haritasını gör", close: "Kapat", back: "Geri",
   error: "Geri bildirim gönderilemedi. Lütfen tekrar deneyin.",
   screenshotError: "Ekran görüntüsü alınamadı. Bunun yerine bir resim ekleyebilirsiniz.",
+  captchaError: "Doğrulama başarısız oldu. Lütfen tekrar deneyin.",
 };
 
 const ar: Strings = {
@@ -272,6 +288,7 @@ const ar: Strings = {
   roadmap: "عرض خارطة الطريق", close: "إغلاق", back: "رجوع",
   error: "تعذر إرسال ملاحظاتك. حاول مرة أخرى.",
   screenshotError: "فشل التقاط الشاشة. يمكنك إرفاق صورة بدلًا من ذلك.",
+  captchaError: "فشل التحقق. يرجى المحاولة مرة أخرى.",
 };
 
 const hi: Strings = {
@@ -285,6 +302,7 @@ const hi: Strings = {
   roadmap: "रोडमैप देखें", close: "बंद करें", back: "वापस",
   error: "प्रतिक्रिया नहीं भेजी जा सकी। कृपया फिर कोशिश करें।",
   screenshotError: "स्क्रीनशॉट नहीं लिया जा सका। आप एक छवि जोड़ सकते हैं।",
+  captchaError: "सत्यापन विफल रहा। कृपया पुनः प्रयास करें।",
 };
 
 const zh: Strings = {
@@ -298,6 +316,7 @@ const zh: Strings = {
   roadmap: "查看路线图", close: "关闭", back: "返回",
   error: "反馈发送失败，请重试。",
   screenshotError: "截图失败。您可以改为附加图片。",
+  captchaError: "验证失败，请重试。",
 };
 
 const ja: Strings = {
@@ -311,6 +330,7 @@ const ja: Strings = {
   roadmap: "ロードマップを見る", close: "閉じる", back: "戻る",
   error: "送信できませんでした。もう一度お試しください。",
   screenshotError: "画面キャプチャに失敗しました。画像ファイルを添付できます。",
+  captchaError: "認証に失敗しました。もう一度お試しください。",
 };
 
 const ko: Strings = {
@@ -324,6 +344,7 @@ const ko: Strings = {
   roadmap: "로드맵 보기", close: "닫기", back: "뒤로",
   error: "피드백을 보낼 수 없었습니다. 다시 시도해 주세요.",
   screenshotError: "화면 캡처에 실패했습니다. 이미지 파일을 첨부할 수 있습니다.",
+  captchaError: "인증에 실패했습니다. 다시 시도해 주세요.",
 };
 
 const vi: Strings = {
@@ -337,6 +358,7 @@ const vi: Strings = {
   roadmap: "Xem lộ trình", close: "Đóng", back: "Quay lại",
   error: "Không thể gửi phản hồi. Vui lòng thử lại.",
   screenshotError: "Chụp màn hình thất bại. Bạn có thể đính kèm một hình ảnh.",
+  captchaError: "Xác minh thất bại. Vui lòng thử lại.",
 };
 
 const id: Strings = {
@@ -350,6 +372,7 @@ const id: Strings = {
   roadmap: "Lihat roadmap", close: "Tutup", back: "Kembali",
   error: "Masukan tidak dapat dikirim. Silakan coba lagi.",
   screenshotError: "Tangkapan layar gagal. Anda dapat melampirkan gambar.",
+  captchaError: "Verifikasi gagal. Silakan coba lagi.",
 };
 
 const th: Strings = {
@@ -363,6 +386,7 @@ const th: Strings = {
   roadmap: "ดูแผนงาน", close: "ปิด", back: "ย้อนกลับ",
   error: "ส่งความคิดเห็นไม่สำเร็จ กรุณาลองอีกครั้ง",
   screenshotError: "จับภาพหน้าจอไม่สำเร็จ คุณสามารถแนบไฟล์ภาพแทนได้",
+  captchaError: "การยืนยันล้มเหลว กรุณาลองอีกครั้ง",
 };
 
 const BASE: Record<string, Strings> = { en, es, fr, de, it, pt, nl, sv, pl, cs, ro, el, uk, ru, tr, ar, hi, zh, ja, ko, vi, id, th };

@@ -7,7 +7,24 @@ import { TYPES, TYPE_LABEL } from "../../../../../../lib/feedback";
 import { Switch } from "../../../../../../components/switch";
 import { ProjectNav } from "../../../../../../components/project-nav";
 import { tr, useI18n } from "../../../../../../i18n";
-import type { FeedbackType, Project, ProjectPatch } from "../../../../../../lib/types";
+import { fmtDateTime } from "../../../../../../lib/feedback";
+import type { FeedbackType, Project, ProjectPatch, Webhook, WebhookDelivery, WebhookEvent } from "../../../../../../lib/types";
+import type { CatalogKey } from "../../../../../../i18n/catalog/en";
+import planLimits from "../../../../../../../../../packages/shared/plan_limits.json";
+
+const WEBHOOK_EVENTS: { ev: WebhookEvent; label: CatalogKey }[] = [
+  { ev: "feedback.created", label: "psettings.eventCreated" },
+  { ev: "feedback.status_changed", label: "psettings.eventStatus" },
+  { ev: "roadmap.status_changed", label: "psettings.eventRoadmap" },
+  { ev: "changelog.published", label: "psettings.eventChangelog" },
+];
+const EVENT_LABEL: Record<string, CatalogKey> = Object.fromEntries(WEBHOOK_EVENTS.map((e) => [e.ev, e.label]));
+const MAX_WEBHOOKS = (planLimits.plans as Record<string, { webhooks_per_project?: number }>).pro?.webhooks_per_project ?? 5;
+const DELIVERY_CLASS: Record<string, string> = {
+  delivered: "bg-green-100 text-green-800",
+  pending: "bg-amber-100 text-amber-800",
+  failed: "bg-red-100 text-red-800",
+};
 
 const APP_URL = (import.meta.env.VITE_APP_URL || "https://retro.3m4.net").replace(/\/$/, "");
 const API_URL = /^https?:\/\//.test(import.meta.env.VITE_API_URL || "") ? (import.meta.env.VITE_API_URL || "").replace(/\/$/, "") : `${APP_URL}/api`;
@@ -59,6 +76,9 @@ export default component$(() => {
     boardTitle: string;
     boardIntro: string;
     accent: string;
+    turnstileSiteKey: string;
+    turnstileSecret: string;
+    exporting: string;
   }>({
     project: null,
     loading: true,
@@ -76,6 +96,41 @@ export default component$(() => {
     boardTitle: "",
     boardIntro: "",
     accent: "",
+    turnstileSiteKey: "",
+    turnstileSecret: "",
+    exporting: "",
+  });
+
+  const hooks = useStore<{
+    items: Webhook[];
+    loading: boolean;
+    error: string;
+    url: string;
+    description: string;
+    events: WebhookEvent[];
+    creating: boolean;
+    createdSecret: string;
+    createdId: string;
+    busy: string;
+    openId: string;
+    deliveries: WebhookDelivery[];
+    deliveriesLoading: boolean;
+    testSent: string;
+  }>({
+    items: [],
+    loading: true,
+    error: "",
+    url: "",
+    description: "",
+    events: WEBHOOK_EVENTS.map((e) => e.ev),
+    creating: false,
+    createdSecret: "",
+    createdId: "",
+    busy: "",
+    openId: "",
+    deliveries: [],
+    deliveriesLoading: false,
+    testSent: "",
   });
 
   const apply = $((p: Project) => {
@@ -87,6 +142,119 @@ export default component$(() => {
     state.boardTitle = p.board_title ?? "";
     state.boardIntro = p.board_intro ?? "";
     state.accent = p.widget_accent ?? "";
+    state.turnstileSiteKey = p.turnstile_site_key ?? "";
+  });
+
+  const loadHooks = $(async () => {
+    hooks.loading = true;
+    hooks.error = "";
+    try {
+      hooks.items = await api.listWebhooks(id);
+    } catch (e) {
+      hooks.error = errorMessage(i18n, e, "psettings.webhookLoadFailed");
+    } finally {
+      hooks.loading = false;
+    }
+  });
+
+  const createHook = $(async () => {
+    if (!hooks.url.trim()) return;
+    hooks.creating = true;
+    hooks.error = "";
+    try {
+      const w = await api.createWebhook(id, { url: hooks.url.trim(), events: hooks.events, description: hooks.description.trim() || undefined });
+      hooks.createdSecret = w.secret ?? "";
+      hooks.createdId = w.id;
+      hooks.url = "";
+      hooks.description = "";
+      hooks.items = [...hooks.items, { ...w, secret: undefined }];
+    } catch (e) {
+      hooks.error = errorMessage(i18n, e, "psettings.webhookSaveFailed");
+    } finally {
+      hooks.creating = false;
+    }
+  });
+
+  const toggleHook = $(async (w: Webhook, enabled: boolean) => {
+    hooks.busy = w.id;
+    try {
+      const updated = await api.updateWebhook(id, w.id, { enabled });
+      hooks.items = hooks.items.map((x) => (x.id === w.id ? updated : x));
+    } catch (e) {
+      hooks.error = errorMessage(i18n, e, "psettings.webhookSaveFailed");
+    } finally {
+      hooks.busy = "";
+    }
+  });
+
+  const deleteHook = $(async (w: Webhook) => {
+    if (!confirm(tr(i18n, "psettings.webhookDeleteConfirm"))) return;
+    hooks.busy = w.id;
+    try {
+      await api.deleteWebhook(id, w.id);
+      hooks.items = hooks.items.filter((x) => x.id !== w.id);
+      if (hooks.openId === w.id) hooks.openId = "";
+    } catch (e) {
+      hooks.error = errorMessage(i18n, e, "psettings.webhookSaveFailed");
+    } finally {
+      hooks.busy = "";
+    }
+  });
+
+  const loadDeliveries = $(async (w: Webhook) => {
+    if (hooks.openId === w.id) {
+      hooks.openId = "";
+      return;
+    }
+    hooks.openId = w.id;
+    hooks.deliveriesLoading = true;
+    try {
+      hooks.deliveries = await api.webhookDeliveries(id, w.id);
+    } catch {
+      hooks.deliveries = [];
+    } finally {
+      hooks.deliveriesLoading = false;
+    }
+  });
+
+  const testHook = $(async (w: Webhook) => {
+    hooks.busy = w.id;
+    hooks.testSent = "";
+    try {
+      await api.testWebhook(id, w.id);
+      hooks.testSent = w.id;
+      setTimeout(() => (hooks.testSent = ""), 2500);
+      if (hooks.openId === w.id) hooks.deliveries = await api.webhookDeliveries(id, w.id);
+    } catch (e) {
+      hooks.error = errorMessage(i18n, e, "psettings.webhookSaveFailed");
+    } finally {
+      hooks.busy = "";
+    }
+  });
+
+  const saveTurnstile = $(async () => {
+    const patch: ProjectPatch = { turnstile_site_key: state.turnstileSiteKey.trim() || null };
+    if (state.turnstileSecret.trim()) patch.turnstile_secret = state.turnstileSecret.trim();
+    await save(patch, "turnstile");
+    state.turnstileSecret = "";
+  });
+
+  const clearTurnstile = $(async () => {
+    await save({ turnstile_site_key: null, turnstile_secret: null }, "turnstile");
+    state.turnstileSecret = "";
+  });
+
+  const exportProject = $(async (format: "json" | "csv") => {
+    if (!state.project) return;
+    state.exporting = format;
+    state.error = "";
+    try {
+      await api.exportProject(id, format, `${state.project.key}-${format === "json" ? "export.json" : "feedback.csv"}`);
+    } catch (e) {
+      state.error = errorMessage(i18n, e, "psettings.exportFailed");
+    } finally {
+      state.exporting = "";
+    }
   });
 
   const load = $(async () => {
@@ -108,6 +276,7 @@ export default component$(() => {
   // eslint-disable-next-line qwik/no-use-visible-task
   useVisibleTask$(() => {
     load();
+    loadHooks();
   });
 
   const save = $(async (patch: ProjectPatch, busy: string) => {
@@ -321,6 +490,159 @@ export default component$(() => {
                   </button>
                 </div>
               </form>
+            </section>
+
+            {/* Webhooks */}
+            <section class="card p-6" id="webhooks" data-testid="webhooks">
+              <h2 class="text-lg font-semibold text-slate-900">{tr(i18n, "psettings.webhooksTitle")}</h2>
+              <p class="mt-1 text-sm text-slate-600">{tr(i18n, "psettings.webhooksBody", { max: MAX_WEBHOOKS })}</p>
+              {!features.webhooks && <p class="mt-2 text-xs text-amber-700">{tr(i18n, "psettings.webhooksFeatureOff")}</p>}
+              {hooks.error && <div class="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{hooks.error}</div>}
+
+              {hooks.createdSecret && (
+                <div class="mt-4 rounded-lg border border-green-300 bg-green-50 p-4">
+                  <p class="text-sm font-semibold text-green-800">{tr(i18n, "psettings.webhookSecretOnce")}</p>
+                  <div class="mt-2 flex items-center gap-2">
+                    <code class="flex-1 overflow-x-auto rounded bg-white px-3 py-2 text-sm text-slate-800" data-testid="webhook-secret">{hooks.createdSecret}</code>
+                    <button type="button" class="btn-secondary" onClick$={() => copy(hooks.createdSecret, "whsecret")}>
+                      {state.copied === "whsecret" ? tr(i18n, "common.copied") : tr(i18n, "common.copy")}
+                    </button>
+                  </div>
+                  <button type="button" class="btn-ghost mt-2 text-xs" onClick$={() => (hooks.createdSecret = "")}>{tr(i18n, "common.dismiss")}</button>
+                </div>
+              )}
+
+              <div class="mt-4 overflow-hidden rounded-lg border border-slate-200">
+                {hooks.loading ? (
+                  <div class="p-6 text-center text-sm text-slate-400">{tr(i18n, "common.loading")}</div>
+                ) : hooks.items.length === 0 ? (
+                  <div class="p-6 text-center text-sm text-slate-500">{tr(i18n, "psettings.webhookEmpty")}</div>
+                ) : (
+                  <ul class="divide-y divide-slate-100">
+                    {hooks.items.map((w) => (
+                      <li key={w.id} class="p-4 text-sm">
+                        <div class="flex flex-wrap items-center gap-3">
+                          <Switch small checked={w.enabled} label={tr(i18n, "common.enabled")} disabled={hooks.busy === w.id} onToggle$={(next) => toggleHook(w, next)} />
+                          <div class="min-w-0 flex-1">
+                            <div class="truncate font-mono text-xs text-slate-800">{w.url}</div>
+                            <div class="mt-0.5 flex flex-wrap gap-1 text-xs text-slate-500">
+                              {w.description && <span class="mr-1">{w.description} ·</span>}
+                              {w.events.map((ev) => <span key={ev} class="badge bg-slate-100 text-slate-600">{EVENT_LABEL[ev] ? tr(i18n, EVENT_LABEL[ev]) : ev}</span>)}
+                            </div>
+                            <div class="mt-0.5 text-xs text-slate-400">
+                              {tr(i18n, "psettings.webhookLastDelivery")}: {w.last_delivery_at ? `${fmtDateTime(w.last_delivery_at, i18n.lang)} · ${w.last_status ?? ""}` : tr(i18n, "psettings.webhookNever")} · <span class="font-mono">{w.secret_prefix}…</span>
+                            </div>
+                          </div>
+                          <div class="flex gap-1">
+                            <button type="button" class="btn-ghost text-xs" disabled={hooks.busy === w.id} onClick$={() => testHook(w)}>
+                              {hooks.testSent === w.id ? tr(i18n, "psettings.webhookTestSent") : tr(i18n, "psettings.webhookTest")}
+                            </button>
+                            <button type="button" class="btn-ghost text-xs" aria-expanded={hooks.openId === w.id} onClick$={() => loadDeliveries(w)}>{tr(i18n, "psettings.webhookDeliveries")}</button>
+                            <button type="button" class="btn-ghost text-xs text-red-600" disabled={hooks.busy === w.id} onClick$={() => deleteHook(w)}>{tr(i18n, "common.delete")}</button>
+                          </div>
+                        </div>
+                        {hooks.openId === w.id && (
+                          <div class="mt-3 rounded-lg bg-slate-50 p-3">
+                            {hooks.deliveriesLoading ? (
+                              <div class="text-xs text-slate-400">{tr(i18n, "common.loading")}</div>
+                            ) : hooks.deliveries.length === 0 ? (
+                              <div class="text-xs text-slate-500">{tr(i18n, "psettings.webhookNoDeliveries")}</div>
+                            ) : (
+                              <ul class="space-y-1 text-xs">
+                                {hooks.deliveries.map((d) => (
+                                  <li key={d.id} class="flex flex-wrap items-center gap-2">
+                                    <span class={["badge", DELIVERY_CLASS[d.status] ?? "bg-slate-100 text-slate-700"]}>
+                                      {d.status === "delivered" ? tr(i18n, "psettings.deliveryDelivered") : d.status === "pending" ? tr(i18n, "psettings.deliveryPending") : tr(i18n, "psettings.deliveryFailed")}
+                                    </span>
+                                    <span class="font-mono text-slate-700">{d.event}</span>
+                                    <span class="text-slate-500">{fmtDateTime(d.created_at, i18n.lang)}</span>
+                                    <span class="text-slate-400">{tr(i18n, "psettings.webhookAttempts", { n: d.attempts })}{d.response_code ? ` · HTTP ${d.response_code}` : ""}</span>
+                                    {d.last_error && <span class="truncate text-red-600" title={d.last_error}>{d.last_error}</span>}
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                          </div>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+
+              <form class="mt-4 space-y-3" preventdefault:submit onSubmit$={createHook}>
+                <div class="grid gap-3 sm:grid-cols-[1fr_auto]">
+                  <div>
+                    <label class="label" for="whurl">{tr(i18n, "psettings.webhookUrl")}</label>
+                    <input id="whurl" type="url" class="input font-mono" placeholder="https://example.com/hooks/retro" value={hooks.url} onInput$={(_, el) => (hooks.url = el.value)} />
+                  </div>
+                  <div>
+                    <label class="label" for="whdesc">{tr(i18n, "psettings.webhookDescription")} <span class="text-slate-400">{tr(i18n, "common.optional")}</span></label>
+                    <input id="whdesc" type="text" class="input" value={hooks.description} onInput$={(_, el) => (hooks.description = el.value)} />
+                  </div>
+                </div>
+                <div class="flex flex-wrap items-center gap-4">
+                  <span class="label mb-0">{tr(i18n, "common.events")}</span>
+                  {WEBHOOK_EVENTS.map((e) => (
+                    <label key={e.ev} class="flex items-center gap-1.5 text-sm text-slate-700">
+                      <input type="checkbox" checked={hooks.events.includes(e.ev)} onChange$={(_, el) => { hooks.events = el.checked ? [...new Set([...hooks.events, e.ev])] : hooks.events.filter((x) => x !== e.ev); }} />
+                      {tr(i18n, e.label)}
+                    </label>
+                  ))}
+                  <button type="submit" class="btn-primary ml-auto" disabled={hooks.creating || !hooks.url.trim() || hooks.events.length === 0 || !features.webhooks}>
+                    {hooks.creating ? tr(i18n, "common.creating") : tr(i18n, "psettings.webhookAdd")}
+                  </button>
+                </div>
+              </form>
+            </section>
+
+            {/* Spam protection */}
+            <section class="card p-6" id="spam" data-testid="spam-protection">
+              <div class="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 class="text-lg font-semibold text-slate-900">{tr(i18n, "psettings.spamTitle")}</h2>
+                  <p class="mt-1 text-sm text-slate-600">{tr(i18n, "psettings.spamBody")}</p>
+                </div>
+                <span class={["badge", p.turnstile_enabled ? "bg-green-100 text-green-800" : "bg-slate-100 text-slate-600"]} data-testid="turnstile-status">
+                  {p.turnstile_enabled ? tr(i18n, "psettings.turnstileOn") : tr(i18n, "psettings.turnstileOff")}
+                </span>
+              </div>
+              <form class="mt-4 space-y-3" preventdefault:submit onSubmit$={saveTurnstile}>
+                <div class="grid gap-3 sm:grid-cols-2">
+                  <div>
+                    <label class="label" for="tssite">{tr(i18n, "psettings.turnstileSiteKey")}</label>
+                    <input id="tssite" type="text" class="input font-mono" autoComplete="off" value={state.turnstileSiteKey} onInput$={(_, el) => (state.turnstileSiteKey = el.value)} />
+                  </div>
+                  <div>
+                    <label class="label" for="tssecret">{tr(i18n, "psettings.turnstileSecret")}</label>
+                    <input id="tssecret" type="password" class="input font-mono" autoComplete="new-password" placeholder={p.turnstile_enabled ? "••••••••" : ""} value={state.turnstileSecret} onInput$={(_, el) => (state.turnstileSecret = el.value)} />
+                    <p class="mt-1 text-xs text-slate-500">{tr(i18n, "psettings.turnstileSecretHint")}</p>
+                  </div>
+                </div>
+                <div class="flex flex-wrap items-center justify-between gap-2">
+                  <span class="text-xs text-slate-500">{tr(i18n, "psettings.turnstileDocs")}</span>
+                  <div class="flex gap-2">
+                    {p.turnstile_enabled && <button type="button" class="btn-ghost text-red-600" disabled={!!state.busy} onClick$={clearTurnstile}>{tr(i18n, "psettings.turnstileClear")}</button>}
+                    <button type="submit" class="btn-primary" disabled={!!state.busy || !state.turnstileSiteKey.trim() || (!state.turnstileSecret.trim() && !p.turnstile_enabled)}>
+                      {state.busy === "turnstile" ? tr(i18n, "common.saving") : state.saved === "turnstile" ? tr(i18n, "common.saved") : tr(i18n, "common.save")}
+                    </button>
+                  </div>
+                </div>
+              </form>
+            </section>
+
+            {/* Export */}
+            <section class="card p-6" id="export" data-testid="export">
+              <h2 class="text-lg font-semibold text-slate-900">{tr(i18n, "psettings.exportTitle")}</h2>
+              <p class="mt-1 text-sm text-slate-600">{tr(i18n, "psettings.exportBody")}</p>
+              <div class="mt-4 flex flex-wrap gap-2">
+                <button type="button" class="btn-secondary" disabled={!!state.exporting} onClick$={() => exportProject("json")}>
+                  {state.exporting === "json" ? tr(i18n, "common.loading") : tr(i18n, "psettings.exportJson")}
+                </button>
+                <button type="button" class="btn-secondary" disabled={!!state.exporting} onClick$={() => exportProject("csv")}>
+                  {state.exporting === "csv" ? tr(i18n, "common.loading") : tr(i18n, "psettings.exportCsv")}
+                </button>
+              </div>
             </section>
 
             {/* Project info */}

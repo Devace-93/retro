@@ -19,8 +19,10 @@ import type {
   Project,
   RoadmapItem,
   Role,
+  SavedView,
   Scope,
   Summary,
+  Webhook,
 } from "../src/types.js";
 
 import roles from "../../shared/api_key_roles.json";
@@ -49,6 +51,10 @@ class FakeApi {
   feedback = new Map<string, FeedbackItem>();
   roadmap = new Map<string, RoadmapItem>();
   changelog = new Map<string, ChangelogEntry>();
+  views = new Map<string, SavedView & { project_id: string }>();
+  webhooks = new Map<string, Webhook & { project_id: string }>();
+  notifications = { email_new_feedback: true, email_digest_minutes: 60, email: "owner@example.com" };
+  mailEnabled = true;
   limitReached: null | "projects" | "roadmap_items" = null;
   calls: string[] = [];
   private n = 0;
@@ -159,6 +165,15 @@ class FakeApi {
           limits: { projects: 20, api_keys: 20, feedback_per_month: 10000, attachment_storage_mb: 2048, roadmap_items_per_project: 500 },
         });
       }
+      if (path === "/account/notifications") {
+        if (method === "GET") return this.need("usage:read") ?? json(200, this.notifications);
+        if (method === "PATCH") {
+          const denied = this.need("projects:write");
+          if (denied) return denied;
+          Object.assign(this.notifications, body);
+          return json(200, this.notifications);
+        }
+      }
       if (path === "/account/audit") {
         return this.need("audit:read") ?? json(200, {
           items: [{
@@ -238,7 +253,7 @@ class FakeApi {
       if (url.searchParams.get("sort") === "oldest") items = [...items].reverse();
       return json(200, { items: items.map(({ notes: _n, ...f }) => f), page: Number(url.searchParams.get("page") ?? 1), per_page: Number(url.searchParams.get("per_page") ?? 50), total: items.length });
     }
-    const fm = sub.match(/^feedback\/([^/]+)(?:\/(notes|promote|screenshot)(?:\/([^/]+))?)?$/);
+    const fm = sub.match(/^feedback\/([^/]+)(?:\/(notes|promote|screenshot|reply|merge)(?:\/([^/]+))?)?$/);
     if (fm) {
       const f = this.findItem(project.id, decodeURIComponent(fm[1]!));
       if (!f) return notFound("Feedback item");
@@ -265,6 +280,26 @@ class FakeApi {
         project.notes.set(f.id, [...(project.notes.get(f.id) ?? []), note]);
         return json(201, note);
       }
+      if (action === "reply" && method === "POST") {
+        const denied = this.need("feedback:write");
+        if (denied) return denied;
+        if (!f.reporter_email) return json(400, { error: { code: "no_reporter_email", message: "No reporter email." } });
+        if (!this.mailEnabled) return json(503, { error: { code: "mail_disabled", message: "Mail is not configured." } });
+        const note: Note = { id: crypto.randomUUID(), body: body.body, author: { id: null, email: null, label: "retro_live_test" }, kind: "reply", delivery: "pending", created_at: NOW };
+        project.notes.set(f.id, [...(project.notes.get(f.id) ?? []), note]);
+        return json(201, note);
+      }
+      if (action === "merge" && method === "POST") {
+        const denied = this.need("feedback:write");
+        if (denied) return denied;
+        const target = this.findItem(project.id, String(body.into));
+        if (!target || target.id === f.id) return json(400, { error: { code: "invalid_merge", message: "Bad target." } });
+        f.status = "declined";
+        f.duplicate_of = target.id;
+        target.tags = [...new Set([...target.tags, ...f.tags])];
+        project.notes.set(target.id, [...(project.notes.get(target.id) ?? []), { id: crypto.randomUUID(), body: `Merged #${f.number}`, author: null, created_at: NOW }]);
+        return json(200, f);
+      }
       if (action === "promote" && method === "POST") {
         const denied = this.need("feedback:write") ?? this.need("board:write");
         if (denied) return denied;
@@ -276,6 +311,64 @@ class FakeApi {
         if (!["in_progress", "done"].includes(f.status)) f.status = "planned";
         return json(201, { item: f, roadmap_item: r });
       }
+    }
+
+    // --- phase 2: export, views, webhooks ---
+    if (sub === "export" && method === "GET") {
+      const denied = this.need("feedback:read") ?? this.need("board:read");
+      if (denied) return denied;
+      const items = this.feedbackOf(project.id);
+      if (url.searchParams.get("format") === "csv") {
+        const rows = items.map((f) => [f.number, f.type, f.sentiment ?? "", f.status, f.priority, f.tags.join("|"), JSON.stringify(f.title), JSON.stringify(f.message), f.reporter_email ?? "", f.page_url ?? "", f.app_version ?? "", f.source, f.created_at].join(","));
+        return new Response(["number,type,sentiment,status,priority,tags,title,message,reporter_email,page_url,app_version,source,created_at", ...rows].join("\n"), { status: 200, headers: { "content-type": "text/csv" } });
+      }
+      return json(200, {
+        format: "retro.project.v1", exported_at: NOW,
+        project: { key: project.key, name: project.name, description: project.description ?? null, url: project.url ?? null, board_slug: project.board_slug, types_enabled: project.types_enabled },
+        feedback: items.map((f) => ({ ...f, notes: project.notes.get(f.id) ?? [] })),
+        roadmap: this.roadmapOf(project.id),
+        changelog: [...this.changelog.values()].filter((c) => c.project_id === project.id),
+      });
+    }
+    if (sub === "views") {
+      if (method === "GET") return this.need("feedback:read") ?? json(200, [...this.views.values()].filter((v) => v.project_id === project.id));
+      if (method === "POST") {
+        const denied = this.need("feedback:write");
+        if (denied) return denied;
+        const mine = [...this.views.values()].filter((v) => v.project_id === project.id);
+        if (mine.length >= 20) return json(400, { error: { code: "too_many_views", message: "Max 20 views." } });
+        const v = { id: crypto.randomUUID(), project_id: project.id, name: body.name, filters: body.filters ?? {}, position: mine.length, created_at: NOW };
+        this.views.set(v.id, v);
+        return json(201, v);
+      }
+    }
+    if (sub === "webhooks") {
+      if (method === "GET") return this.need("projects:read") ?? json(200, [...this.webhooks.values()].filter((w) => w.project_id === project.id).map(({ secret: _s, ...w }) => w));
+      if (method === "POST") {
+        const denied = this.need("projects:write");
+        if (denied) return denied;
+        if (!String(body.url).startsWith("https://")) return json(400, { error: { code: "invalid_url", message: "https only." } });
+        this.n += 1;
+        const w = {
+          id: crypto.randomUUID(), project_id: project.id, url: body.url, events: body.events ?? ["feedback.created", "feedback.status_changed", "roadmap.status_changed", "changelog.published"],
+          description: body.description ?? null, enabled: true, secret_prefix: `whsec_${this.n}`, secret: `whsec_${this.n}_full_secret`,
+          last_delivery_at: null, last_status: null, created_at: NOW,
+        } satisfies Webhook & { project_id: string };
+        this.webhooks.set(w.id, w);
+        return json(201, w);
+      }
+    }
+    const wm = sub.match(/^webhooks\/([^/]+)\/(test|deliveries)$/);
+    if (wm) {
+      const w = this.webhooks.get(wm[1]!);
+      if (!w || w.project_id !== project.id) return notFound("Webhook");
+      if (wm[2] === "test" && method === "POST") {
+        const denied = this.need("projects:write");
+        if (denied) return denied;
+        w.last_status = "pending";
+        return json(202, { delivery_id: crypto.randomUUID() });
+      }
+      if (wm[2] === "deliveries" && method === "GET") return this.need("projects:read") ?? json(200, []);
     }
 
     // --- roadmap ---
@@ -394,7 +487,10 @@ describe("RBAC: tool visibility follows the key's role", () => {
     const { toolNames } = await connect("viewer");
     const names = await toolNames();
     expect(names).toEqual(
-      ["feedback_summary", "get_feedback", "get_project", "get_usage", "list_changelog", "list_feedback", "list_projects", "list_roadmap", "list_tags"].sort(),
+      [
+        "feedback_summary", "get_feedback", "get_project", "get_usage", "list_changelog", "list_feedback", "list_projects", "list_roadmap", "list_tags",
+        "export_project", "list_saved_views", "list_webhooks", "get_notification_settings",
+      ].sort(),
     );
     expect(names).not.toContain("update_feedback");
     expect(names).not.toContain("delete_feedback");
@@ -403,7 +499,7 @@ describe("RBAC: tool visibility follows the key's role", () => {
   test("editor adds write tools but no delete or audit", async () => {
     const { toolNames } = await connect("editor");
     const names = await toolNames();
-    for (const t of ["create_project", "update_project", "rotate_project_key", "update_feedback", "add_note", "promote_to_roadmap", "create_roadmap_item", "update_roadmap_item", "create_changelog_entry", "update_changelog_entry"]) {
+    for (const t of ["create_project", "update_project", "rotate_project_key", "update_feedback", "add_note", "promote_to_roadmap", "create_roadmap_item", "update_roadmap_item", "create_changelog_entry", "update_changelog_entry", "reply_to_reporter", "merge_feedback", "create_saved_view", "create_webhook", "test_webhook", "update_notification_settings"]) {
       expect(names).toContain(t);
     }
     for (const t of ["delete_project", "delete_feedback", "delete_roadmap_item", "delete_changelog_entry", "get_audit_log"]) expect(names).not.toContain(t);
@@ -412,7 +508,7 @@ describe("RBAC: tool visibility follows the key's role", () => {
   test("admin sees every tool in CONTRACT.md", async () => {
     const { toolNames } = await connect("admin");
     expect(await toolNames()).toEqual([...ALL_TOOLS].sort());
-    expect(ALL_TOOLS).toHaveLength(24);
+    expect(ALL_TOOLS).toHaveLength(34);
   });
 
   test("promote_to_roadmap needs BOTH feedback:write and board:write", () => {
@@ -701,6 +797,131 @@ describe("destructive tools require human approval", () => {
     expect(c.api.projects.has(p.id)).toBe(true);
     expect(c.audit.entries.at(-1)?.outcome).toBe("cancelled");
     expect(c.api.calls.filter((x) => x.startsWith("DELETE"))).toHaveLength(0);
+  });
+});
+
+describe("phase 2: export, replies, merge, views, webhooks, notifications", () => {
+  test("export_project returns the json document and csv text", async () => {
+    const c = await connect("viewer", { api: (() => { const a = new FakeApi("admin"); return a; })() });
+    // seed through the admin-role api, then read as viewer
+    const api = c.api;
+    api.role = "admin";
+    const p = (await c.call("list_projects")).structuredContent as { items: Project[] };
+    expect(p.items).toHaveLength(0);
+    const admin = await connect("admin", { api });
+    const proj = await admin.project();
+    api.ingest(proj.id, { message: "Export me", tags: ["x"] });
+    await admin.call("create_changelog_entry", { project_id: proj.id, title: "v1", body: "b", publish: true });
+    api.role = "viewer";
+    const js = await c.call("export_project", { project_id: proj.id });
+    expect(js.isError).toBeFalsy();
+    const doc = (js.structuredContent as { export: { format: string; feedback: FeedbackItem[]; changelog: ChangelogEntry[] } }).export;
+    expect(doc.format).toBe("retro.project.v1");
+    expect(doc.feedback).toHaveLength(1);
+    expect(doc.changelog).toHaveLength(1);
+    const csv = await c.call("export_project", { project_id: proj.id, format: "csv" });
+    const sc = csv.structuredContent as { format: string; csv: string; rows: number };
+    expect(sc.format).toBe("csv");
+    expect(sc.rows).toBe(1);
+    expect(sc.csv.split("\n")[0]).toContain("number,type,sentiment");
+  });
+
+  test("reply_to_reporter stores a reply note; missing email and disabled mail surface their codes", async () => {
+    const c = await connect("editor");
+    const p = await c.project();
+    const withEmail = c.api.ingest(p.id, { message: "Hi", reporter_email: "r@example.com" });
+    const noEmail = c.api.ingest(p.id, { message: "Anon" });
+    const ok = await c.call("reply_to_reporter", { project_id: p.id, item: withEmail.number, body: "Thanks, fixed in 1.2." });
+    expect(ok.isError).toBeFalsy();
+    expect(ok.structuredContent).toMatchObject({ kind: "reply", delivery: "pending" });
+    const got = await c.call("get_feedback", { project_id: p.id, item: withEmail.id });
+    expect(c.textOf(got)).toContain("(reply, pending)");
+    const bad = await c.call("reply_to_reporter", { project_id: p.id, item: noEmail.id, body: "?" });
+    expect(bad.isError).toBe(true);
+    expect(c.textOf(bad)).toContain("no_reporter_email");
+    c.api.mailEnabled = false;
+    const off = await c.call("reply_to_reporter", { project_id: p.id, item: withEmail.id, body: "again" });
+    expect(c.textOf(off)).toContain("mail_disabled");
+  });
+
+  test("merge_feedback needs confirmation, then closes the duplicate and shows duplicate_of", async () => {
+    const c = await connect("editor");
+    const p = await c.project();
+    const keep = c.api.ingest(p.id, { message: "Dark mode please", tags: ["ui"] });
+    const dup = c.api.ingest(p.id, { message: "Dark mode pls", tags: ["theme"] });
+    const refused = await c.call("merge_feedback", { project_id: p.id, item: dup.number, into: keep.number });
+    expect(refused.isError).toBe(true);
+    expect(c.textOf(refused)).toContain("confirmation_required");
+    expect(c.api.calls.filter((x) => x.includes("/merge"))).toHaveLength(0);
+    const self = await c.call("merge_feedback", { project_id: p.id, item: dup.id, into: dup.id, confirm: true });
+    expect(self.isError).toBe(true);
+    expect(c.textOf(self)).toContain("invalid_merge");
+    const merged = await c.call("merge_feedback", { project_id: p.id, item: dup.number, into: keep.number, confirm: true });
+    expect(merged.isError).toBeFalsy();
+    expect(merged.structuredContent).toMatchObject({ merged: true, id: dup.id, into: keep.id });
+    expect(c.api.feedback.get(dup.id)!.status).toBe("declined");
+    expect(c.api.feedback.get(keep.id)!.tags.sort()).toEqual(["theme", "ui"]);
+    const got = await c.call("get_feedback", { project_id: p.id, item: dup.id });
+    expect(c.textOf(got)).toContain(`Duplicate of item id ${keep.id}`);
+    expect(c.audit.entries.map((e) => e.outcome)).toContain("pending");
+  });
+
+  test("merge_feedback with elicitation asks the user with a merge wording", async () => {
+    const messages: string[] = [];
+    const c = await connect("editor", { elicit: async (m) => { messages.push(m); return { action: "decline" }; } });
+    const p = await c.project();
+    const keep = c.api.ingest(p.id, { message: "A" });
+    const dup = c.api.ingest(p.id, { message: "A again" });
+    const r = await c.call("merge_feedback", { project_id: p.id, item: dup.id, into: keep.id });
+    expect(messages[0]).toContain("Merge feedback #2");
+    expect(c.textOf(r)).toContain("Merge was cancelled");
+    expect(c.api.feedback.get(dup.id)!.status).toBe("new");
+  });
+
+  test("saved views: create then list; viewer can list but not create", async () => {
+    const c = await connect("editor");
+    const p = await c.project();
+    const v = await c.call("create_saved_view", { project_id: p.id, name: "Open bugs", filters: { type: "bug", status: "new,triaged", sort: "newest" } });
+    expect(v.isError).toBeFalsy();
+    expect(v.structuredContent).toMatchObject({ name: "Open bugs", filters: { type: "bug" } });
+    const list = await c.call("list_saved_views", { project_id: p.id });
+    expect((list.structuredContent as { items: SavedView[] }).items).toHaveLength(1);
+    const viewer = await connect("viewer", { api: Object.assign(c.api, { role: "viewer" as Role }) });
+    expect(await viewer.toolNames()).not.toContain("create_saved_view");
+    expect(await viewer.toolNames()).toContain("list_saved_views");
+  });
+
+  test("webhooks: create returns the secret once, list hides it, test queues a ping", async () => {
+    const c = await connect("editor");
+    const p = await c.project();
+    const w = await c.call("create_webhook", { project_id: p.id, url: "https://example.com/hook", events: ["feedback.created"] });
+    expect(w.isError).toBeFalsy();
+    const hook = w.structuredContent as Webhook;
+    expect(hook.secret).toMatch(/_full_secret$/);
+    expect(c.textOf(w)).toContain("Secret (shown once)");
+    const list = await c.call("list_webhooks", { project_id: p.id });
+    const items = (list.structuredContent as { items: Webhook[] }).items;
+    expect(items).toHaveLength(1);
+    expect(items[0]!.secret).toBeUndefined();
+    const t = await c.call("test_webhook", { project_id: p.id, webhook_id: hook.id });
+    expect(t.structuredContent).toHaveProperty("delivery_id");
+    const bad = await c.call("create_webhook", { project_id: p.id, url: "not a url" });
+    expect(bad.isError).toBe(true);
+    const missing = await c.call("test_webhook", { project_id: p.id, webhook_id: crypto.randomUUID() });
+    expect(c.textOf(missing)).toContain("not_found");
+  });
+
+  test("notification settings: read for viewer, update for editor with validated digest values", async () => {
+    const c = await connect("editor");
+    const get = await c.call("get_notification_settings");
+    expect(get.structuredContent).toMatchObject({ email_new_feedback: true, email_digest_minutes: 60 });
+    const upd = await c.call("update_notification_settings", { email_digest_minutes: 1440, email_new_feedback: false });
+    expect(upd.structuredContent).toMatchObject({ email_new_feedback: false, email_digest_minutes: 1440 });
+    const bad = await c.call("update_notification_settings", { email_digest_minutes: 7 });
+    expect(bad.isError).toBe(true);
+    const viewer = await connect("viewer");
+    expect(await viewer.toolNames()).toContain("get_notification_settings");
+    expect(await viewer.toolNames()).not.toContain("update_notification_settings");
   });
 });
 

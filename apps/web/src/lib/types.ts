@@ -22,6 +22,7 @@ export interface Limits {
   feedback_per_month: number;
   attachment_storage_mb: number;
   roadmap_items_per_project: number;
+  webhooks_per_project?: number;
   audit_retention_days: number;
   max_users: number;
   api?: string;
@@ -81,6 +82,9 @@ export interface Project {
   allow_screenshots: boolean;
   allow_email: boolean;
   widget_accent?: string | null;
+  /** Cloudflare Turnstile (Phase 2). The secret is write-only; `turnstile_enabled` says whether both are set. */
+  turnstile_site_key?: string | null;
+  turnstile_enabled?: boolean;
   counts: { feedback: number; new: number; roadmap: number };
   created_at: string;
   updated_at: string;
@@ -100,12 +104,21 @@ export interface ProjectPatch {
   allow_screenshots?: boolean;
   allow_email?: boolean;
   widget_accent?: string | null;
+  turnstile_site_key?: string | null;
+  /** Write-only: never returned by the API. */
+  turnstile_secret?: string | null;
 }
+
+export type NoteKind = "note" | "reply";
+export type ReplyDelivery = "pending" | "sent" | "failed";
 
 export interface Note {
   id: string;
   body: string;
-  author?: { id: string; email?: string } | null;
+  author?: { id: string | null; email?: string | null; label?: string | null } | null;
+  /** Phase 2: `reply` notes are emailed to the reporter. */
+  kind?: NoteKind;
+  delivery?: ReplyDelivery | null;
   created_at: string;
 }
 
@@ -139,8 +152,21 @@ export interface FeedbackItem {
   screenshot?: ScreenshotMeta | null;
   roadmap_item_id?: string | null;
   notes?: Note[];
+  /** Phase 2 (detail only): possible duplicates by text similarity. */
+  similar?: SimilarItem[];
+  /** Phase 2: set when this item was merged into another one. */
+  duplicate_of?: string | null;
+  watchers?: string[];
   created_at: string;
   updated_at: string;
+}
+
+export interface SimilarItem {
+  id: string;
+  number: number;
+  title: string;
+  status: FeedbackStatus;
+  similarity: number;
 }
 
 export interface FeedbackPatch {
@@ -165,6 +191,8 @@ export interface FeedbackQuery {
   page?: number;
   per_page?: number;
   sort?: "newest" | "oldest" | "votes";
+  /** Phase 2: hide items merged into another one. */
+  duplicates?: "show" | "hide";
 }
 
 export interface RoadmapItem {
@@ -229,6 +257,8 @@ export interface Board {
   can_submit: boolean;
   can_vote: boolean;
   types_enabled: FeedbackType[];
+  /** Phase 2: present when the project protects submissions with Cloudflare Turnstile. */
+  turnstile_site_key?: string | null;
 }
 
 export interface IngestResponse {
@@ -283,11 +313,85 @@ export interface AuditEvent {
   meta?: Record<string, unknown>;
 }
 
-/** `which` is set on 402 limit_reached: projects | api_keys | roadmap_items. */
+/** `which` is set on 402 limit_reached: projects | api_keys | roadmap_items | webhooks. */
 export interface ApiError {
   code: string;
   message: string;
   which?: string;
   required_scope?: string;
   role?: string;
+}
+
+/* ─── Phase 2 ──────────────────────────────────────────────────────────── */
+
+export type WebhookEvent =
+  | "feedback.created"
+  | "feedback.status_changed"
+  | "roadmap.status_changed"
+  | "changelog.published"
+  | "ping";
+
+export interface Webhook {
+  id: string;
+  url: string;
+  events: WebhookEvent[];
+  description?: string | null;
+  enabled: boolean;
+  secret_prefix: string;
+  /** Full secret; present ONLY on create. */
+  secret?: string;
+  last_delivery_at?: string | null;
+  last_status?: string | null;
+  created_at: string;
+}
+
+export type DeliveryStatus = "pending" | "delivered" | "failed";
+
+export interface WebhookDelivery {
+  id: string;
+  event: WebhookEvent | string;
+  status: DeliveryStatus;
+  attempts: number;
+  response_code?: number | null;
+  last_error?: string | null;
+  created_at: string;
+  delivered_at?: string | null;
+}
+
+export interface SavedViewFilters {
+  q?: string;
+  type?: string;
+  status?: string;
+  sentiment?: string;
+  priority?: string;
+  tag?: string;
+  has_screenshot?: boolean;
+  sort?: "newest" | "oldest" | "votes";
+}
+
+export interface SavedView {
+  id: string;
+  name: string;
+  filters: SavedViewFilters;
+  position: number;
+  created_at: string;
+}
+
+/** 0 = instant (one mail per item); otherwise minutes between digests. */
+export type DigestMinutes = 0 | 15 | 60 | 1440;
+
+export interface NotificationSettings {
+  email_new_feedback: boolean;
+  email_digest_minutes: DigestMinutes;
+  /** Where notifications go: the account owner's email. */
+  email?: string | null;
+}
+
+export interface ProjectExport {
+  format: "retro.project.v1";
+  exported_at: string;
+  project: Record<string, unknown>;
+  feedback: FeedbackItem[];
+  roadmap: RoadmapItem[];
+  changelog: ChangelogEntry[];
 }

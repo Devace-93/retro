@@ -14,6 +14,7 @@ from sqlalchemy import select
 from dbcore import audit
 from dbcore.config import config
 from dbcore.db import session_scope
+from dbcore.events import emit
 from dbcore.models import ChangelogEntry, RoadmapItem
 
 from ..auth_utils import actor, require_auth_or_api_key, require_scope
@@ -124,6 +125,9 @@ def create_entry(project_id):
                 target_id=str(entry.id), meta={"title": title, "published": True}, **actor(),
             )
         session.flush()
+        session.refresh(entry)
+        if publish:
+            emit(session, project, "changelog.published", serialize_changelog_entry(entry))
         body = serialize_changelog_entry(entry)
     return jsonify(body), 201
 
@@ -186,6 +190,8 @@ def patch_entry(project_id, cid):
             )
         session.flush()
         session.refresh(entry)
+        if flipped:
+            emit(session, project, "changelog.published", serialize_changelog_entry(entry))
         body = serialize_changelog_entry(entry)
     return jsonify(body)
 

@@ -1,7 +1,8 @@
-import { component$, useStore, useVisibleTask$, useTask$, $ } from "@builder.io/qwik";
+import { component$, useContext, useStore, useVisibleTask$, useTask$, $ } from "@builder.io/qwik";
 import { Link, useLocation, useNavigate, type DocumentHead } from "@builder.io/qwik-city";
 import { api, ApiRequestError } from "../../../../../lib/api";
 import { errorMessage } from "../../../../../lib/errors";
+import { FeaturesContext } from "../../../../../lib/features";
 import {
   PRIORITIES,
   PRIORITY_LABEL,
@@ -19,7 +20,24 @@ import {
 import { PriorityBadge, SentimentBadge, StatusBadge, TypeBadge } from "../../../../../components/badges";
 import { ProjectNav } from "../../../../../components/project-nav";
 import { tr, useI18n } from "../../../../../i18n";
-import type { FeedbackItem, FeedbackStatus, Priority, Project, Summary } from "../../../../../lib/types";
+import type { FeedbackItem, FeedbackStatus, Priority, Project, SavedView, SavedViewFilters, Summary } from "../../../../../lib/types";
+import type { CatalogKey } from "../../../../../i18n/catalog/en";
+
+/** Virtual views rendered before the saved ones; never stored. */
+const VIRTUAL_VIEWS: { id: string; label: CatalogKey; filters: SavedViewFilters }[] = [
+  { id: "all", label: "inbox.viewAll", filters: {} },
+  { id: "new", label: "inbox.viewNew", filters: { status: "new" } },
+  { id: "bugs", label: "inbox.viewBugs", filters: { type: "bug" } },
+  { id: "features", label: "inbox.viewFeatures", filters: { type: "feature" } },
+  { id: "positive", label: "inbox.viewPositive", filters: { sentiment: "positive" } },
+  { id: "negative", label: "inbox.viewNegative", filters: { sentiment: "negative" } },
+];
+
+function sameFilters(a: SavedViewFilters, b: SavedViewFilters): boolean {
+  const norm = (f: SavedViewFilters) =>
+    JSON.stringify({ q: f.q || "", type: f.type || "", status: f.status || "", sentiment: f.sentiment || "", priority: f.priority || "", tag: f.tag || "", has_screenshot: !!f.has_screenshot, sort: f.sort || "newest" });
+  return norm(a) === norm(b);
+}
 
 const PER_PAGE = 50;
 
@@ -27,6 +45,7 @@ export default component$(() => {
   const loc = useLocation();
   const nav = useNavigate();
   const i18n = useI18n();
+  const features = useContext(FeaturesContext);
   const id = loc.params.id;
 
   const state = useStore<{
@@ -47,6 +66,12 @@ export default component$(() => {
     tag: string;
     hasScreenshot: boolean;
     sort: "newest" | "oldest";
+    hideDuplicates: boolean;
+    views: SavedView[];
+    viewNameOpen: boolean;
+    viewName: string;
+    viewBusy: boolean;
+    viewError: string;
   }>({
     project: null,
     summary: null,
@@ -64,6 +89,12 @@ export default component$(() => {
     tag: "",
     hasScreenshot: false,
     sort: "newest",
+    hideDuplicates: false,
+    views: [],
+    viewNameOpen: false,
+    viewName: "",
+    viewBusy: false,
+    viewError: "",
   });
 
   const drawer = useStore<{
@@ -76,18 +107,24 @@ export default component$(() => {
     note: string;
     busy: string;
     deleteArmed: boolean;
-  }>({ open: false, item: null, loading: false, error: "", screenshotUrl: "", tagsText: "", note: "", busy: "", deleteArmed: false });
+    reply: string;
+    replyError: string;
+    mergeArmed: string;
+    dupTarget: FeedbackItem | null;
+  }>({ open: false, item: null, loading: false, error: "", screenshotUrl: "", tagsText: "", note: "", busy: "", deleteArmed: false, reply: "", replyError: "", mergeArmed: "", dupTarget: null });
 
   const loadProject = $(async () => {
     try {
-      const [project, summary, tags] = await Promise.all([
+      const [project, summary, tags, views] = await Promise.all([
         api.getProject(id),
         api.projectSummary(id).catch(() => null),
         api.projectTags(id).catch(() => ({ tags: [] })),
+        api.listViews(id).catch(() => [] as SavedView[]),
       ]);
       state.project = project;
       state.summary = summary;
       state.tags = tags.tags;
+      state.views = views;
     } catch (e) {
       if (e instanceof ApiRequestError && e.status === 401) {
         nav("/login");
@@ -112,6 +149,7 @@ export default component$(() => {
         page: state.page,
         per_page: PER_PAGE,
         sort: state.sort,
+        duplicates: state.hideDuplicates ? "hide" : undefined,
       });
       state.items = res.items;
       state.total = res.total;
@@ -134,7 +172,7 @@ export default component$(() => {
 
   // Reload the list whenever a filter changes (debounce the search box).
   useTask$(({ track, cleanup }) => {
-    track(() => [state.q, state.type, state.status, state.sentiment, state.priority, state.tag, state.hasScreenshot, state.sort, state.page]);
+    track(() => [state.q, state.type, state.status, state.sentiment, state.priority, state.tag, state.hasScreenshot, state.sort, state.page, state.hideDuplicates]);
     if (typeof window === "undefined") return;
     const t = setTimeout(() => loadItems(), state.q ? 300 : 0);
     cleanup(() => clearTimeout(t));
@@ -150,11 +188,65 @@ export default component$(() => {
     }
   });
 
+  const currentFilters = $((): SavedViewFilters => ({
+    q: state.q.trim() || undefined,
+    type: state.type || undefined,
+    status: state.status || undefined,
+    sentiment: state.sentiment || undefined,
+    priority: state.priority || undefined,
+    tag: state.tag || undefined,
+    has_screenshot: state.hasScreenshot || undefined,
+    sort: state.sort,
+  }));
+
+  const applyView = $((f: SavedViewFilters) => {
+    state.q = f.q ?? "";
+    state.type = f.type ?? "";
+    state.status = f.status ?? "";
+    state.sentiment = f.sentiment ?? "";
+    state.priority = f.priority ?? "";
+    state.tag = f.tag ?? "";
+    state.hasScreenshot = !!f.has_screenshot;
+    state.sort = f.sort === "oldest" ? "oldest" : "newest";
+    state.page = 1;
+  });
+
+  const saveView = $(async () => {
+    const name = state.viewName.trim();
+    if (!name) return;
+    state.viewBusy = true;
+    state.viewError = "";
+    try {
+      const view = await api.createView(id, name, await currentFilters());
+      state.views = [...state.views, view];
+      state.viewName = "";
+      state.viewNameOpen = false;
+    } catch (e) {
+      state.viewError = errorMessage(i18n, e, "inbox.viewsFailed");
+    } finally {
+      state.viewBusy = false;
+    }
+  });
+
+  const deleteView = $(async (v: SavedView) => {
+    if (!confirm(tr(i18n, "inbox.deleteViewConfirm"))) return;
+    try {
+      await api.deleteView(id, v.id);
+      state.views = state.views.filter((x) => x.id !== v.id);
+    } catch (e) {
+      state.viewError = errorMessage(i18n, e, "inbox.viewsFailed");
+    }
+  });
+
   const closeDrawer = $(() => {
     drawer.open = false;
     drawer.item = null;
     drawer.error = "";
     drawer.deleteArmed = false;
+    drawer.mergeArmed = "";
+    drawer.reply = "";
+    drawer.replyError = "";
+    drawer.dupTarget = null;
     if (drawer.screenshotUrl) {
       URL.revokeObjectURL(drawer.screenshotUrl);
       drawer.screenshotUrl = "";
@@ -171,12 +263,19 @@ export default component$(() => {
     drawer.item = item;
     drawer.tagsText = item.tags.join(", ");
     drawer.note = "";
+    drawer.reply = "";
+    drawer.replyError = "";
+    drawer.mergeArmed = "";
+    drawer.dupTarget = null;
     try {
       const full = await api.getFeedback(id, item.id);
       drawer.item = full;
       drawer.tagsText = full.tags.join(", ");
       if (full.has_screenshot) {
         api.screenshotUrl(id, full.id).then((url) => (drawer.screenshotUrl = url)).catch(() => {});
+      }
+      if (full.duplicate_of) {
+        api.getFeedback(id, full.duplicate_of).then((t) => (drawer.dupTarget = t)).catch(() => {});
       }
     } catch (e) {
       drawer.error = errorMessage(i18n, e, "inbox.loadFailed");
@@ -242,6 +341,47 @@ export default component$(() => {
     }
   });
 
+  const merge = $(async (into: string) => {
+    if (!drawer.item) return;
+    if (drawer.mergeArmed !== into) {
+      drawer.mergeArmed = into;
+      return;
+    }
+    drawer.busy = "merge";
+    drawer.error = "";
+    try {
+      const updated = await api.mergeFeedback(id, drawer.item.id, into);
+      drawer.item = { ...updated, notes: updated.notes ?? drawer.item.notes, similar: [] };
+      drawer.mergeArmed = "";
+      state.items = state.hideDuplicates ? state.items.filter((it) => it.id !== updated.id) : state.items.map((it) => (it.id === updated.id ? { ...it, ...updated, notes: undefined } : it));
+      api.getFeedback(id, into).then((t) => (drawer.dupTarget = t)).catch(() => {});
+      refreshCounts();
+    } catch (e) {
+      drawer.error = errorMessage(i18n, e, "inbox.mergeFailed");
+    } finally {
+      drawer.busy = "";
+    }
+  });
+
+  const sendReply = $(async () => {
+    if (!drawer.item || !drawer.reply.trim()) return;
+    drawer.busy = "reply";
+    drawer.replyError = "";
+    try {
+      const note = await api.replyToReporter(id, drawer.item.id, drawer.reply.trim());
+      drawer.item = { ...drawer.item, notes: [...(drawer.item.notes ?? []), note] };
+      drawer.reply = "";
+    } catch (e) {
+      drawer.replyError = e instanceof ApiRequestError && e.error.code === "mail_disabled"
+        ? tr(i18n, "inbox.replyMailOff")
+        : e instanceof ApiRequestError && e.error.code === "no_reporter_email"
+          ? tr(i18n, "inbox.replyNoEmail")
+          : errorMessage(i18n, e, "inbox.replyFailed");
+    } finally {
+      drawer.busy = "";
+    }
+  });
+
   const remove = $(async () => {
     if (!drawer.item) return;
     if (!drawer.deleteArmed) {
@@ -278,6 +418,11 @@ export default component$(() => {
   const pages = Math.max(1, Math.ceil(state.total / PER_PAGE));
   const item = drawer.item;
   const summary = state.summary;
+  const liveFilters: SavedViewFilters = {
+    q: state.q.trim() || undefined, type: state.type || undefined, status: state.status || undefined, sentiment: state.sentiment || undefined,
+    priority: state.priority || undefined, tag: state.tag || undefined, has_screenshot: state.hasScreenshot || undefined, sort: state.sort,
+  };
+  const mailOn = features.mail !== false;
 
   return (
     <>
@@ -313,8 +458,39 @@ export default component$(() => {
           </div>
         )}
 
+        {/* Views strip */}
+        <div class="mt-6 flex flex-wrap items-center gap-1.5" role="tablist" aria-label={tr(i18n, "inbox.views")} data-testid="views">
+          {VIRTUAL_VIEWS.map((v) => {
+            const active = sameFilters(v.filters, liveFilters);
+            return (
+              <button key={v.id} type="button" role="tab" aria-selected={active} class={["rounded-full px-3 py-1 text-sm font-medium", active ? "bg-primary-600 text-white" : "bg-slate-100 text-slate-700 hover:bg-slate-200"]} onClick$={() => applyView(v.filters)}>
+                {tr(i18n, v.label)}
+              </button>
+            );
+          })}
+          {state.views.map((v) => {
+            const active = sameFilters(v.filters, liveFilters);
+            return (
+              <span key={v.id} class={["group inline-flex items-center rounded-full text-sm font-medium", active ? "bg-primary-600 text-white" : "bg-slate-100 text-slate-700 hover:bg-slate-200"]}>
+                <button type="button" role="tab" aria-selected={active} class="px-3 py-1" onClick$={() => applyView(v.filters)}>{v.name}</button>
+                <button type="button" class="pr-2 text-xs opacity-60 hover:opacity-100" aria-label={`${tr(i18n, "common.delete")}: ${v.name}`} onClick$={() => deleteView(v)}>×</button>
+              </span>
+            );
+          })}
+          {state.viewNameOpen ? (
+            <form class="inline-flex items-center gap-1" preventdefault:submit onSubmit$={saveView}>
+              <input type="text" class="input h-8 w-40 py-0 text-sm" placeholder={tr(i18n, "inbox.saveViewName")} value={state.viewName} onInput$={(_, el) => (state.viewName = el.value)} autoFocus />
+              <button type="submit" class="btn-primary h-8 px-2 py-0 text-xs" disabled={state.viewBusy || !state.viewName.trim()}>{tr(i18n, "common.save")}</button>
+              <button type="button" class="btn-ghost h-8 px-2 py-0 text-xs" onClick$={() => { state.viewNameOpen = false; state.viewName = ""; }}>{tr(i18n, "common.cancel")}</button>
+            </form>
+          ) : (
+            hasFilters && <button type="button" class="btn-ghost text-xs" onClick$={() => (state.viewNameOpen = true)}>+ {tr(i18n, "inbox.saveView")}</button>
+          )}
+          {state.viewError && <span class="text-xs text-red-600">{state.viewError}</span>}
+        </div>
+
         {/* Filter bar */}
-        <div class="mt-6 flex flex-wrap items-center gap-2">
+        <div class="mt-3 flex flex-wrap items-center gap-2">
           <input
             type="search"
             class="input w-full sm:w-64"
@@ -349,6 +525,10 @@ export default component$(() => {
           <label class="flex items-center gap-1.5 text-sm text-slate-600">
             <input type="checkbox" checked={state.hasScreenshot} onChange$={(_, el) => { state.hasScreenshot = el.checked; state.page = 1; }} />
             {tr(i18n, "inbox.withScreenshot")}
+          </label>
+          <label class="flex items-center gap-1.5 text-sm text-slate-600">
+            <input type="checkbox" checked={state.hideDuplicates} onChange$={(_, el) => { state.hideDuplicates = el.checked; state.page = 1; }} />
+            {tr(i18n, "inbox.hideDuplicates")}
           </label>
           <select class="input ml-auto w-auto" aria-label={tr(i18n, "inbox.sort")} value={state.sort} onChange$={(_, el) => (state.sort = el.value as "newest" | "oldest")}>
             <option value="newest" selected={state.sort === "newest"}>{tr(i18n, "inbox.sortNewest")}</option>
@@ -399,6 +579,7 @@ export default component$(() => {
                       <span class="mt-0.5 block truncate text-sm text-slate-500">{it.message}</span>
                       <span class="mt-1.5 flex flex-wrap items-center gap-2 text-xs text-slate-400">
                         <StatusBadge status={it.status} />
+                        {it.duplicate_of && <span class="badge bg-slate-200 text-slate-600">⧉</span>}
                         <PriorityBadge priority={it.priority} />
                         {it.tags.map((t) => <span key={t} class="badge bg-slate-100 text-slate-600">{t}</span>)}
                         {it.page_url && <span class="truncate">{shortUrl(it.page_url)}</span>}
@@ -446,6 +627,13 @@ export default component$(() => {
                     <SentimentBadge sentiment={item.sentiment} />
                     <span class="badge bg-slate-100 text-slate-600">{item.source}</span>
                     <span>{fmtDateTime(item.created_at, i18n.lang)}</span>
+                    {item.duplicate_of && (
+                      <span class="badge bg-slate-200 text-slate-700" data-testid="duplicate-badge">
+                        {drawer.dupTarget ? (
+                          <button type="button" class="hover:underline" onClick$={() => openItem(drawer.dupTarget!)}>{tr(i18n, "inbox.duplicateOf", { number: drawer.dupTarget.number })}</button>
+                        ) : "⧉"}
+                      </span>
+                    )}
                   </div>
                 )}
                 <h2 class="mt-1 text-lg font-semibold text-slate-900">{item?.title}</h2>
@@ -521,6 +709,32 @@ export default component$(() => {
                   )}
                 </div>
 
+                {/* Possible duplicates */}
+                {!item.duplicate_of && (item.similar ?? []).length > 0 && (
+                  <div class="rounded-lg border border-amber-200 bg-amber-50 p-3" data-testid="possible-duplicates">
+                    <h3 class="text-sm font-semibold text-amber-900">{tr(i18n, "inbox.possibleDuplicates")}</h3>
+                    <ul class="mt-2 space-y-1.5">
+                      {(item.similar ?? []).map((sim) => (
+                        <li key={sim.id} class="flex flex-wrap items-center gap-2 text-sm">
+                          <span class="font-mono text-xs text-slate-500">#{sim.number}</span>
+                          <span class="min-w-0 flex-1 truncate text-slate-800">{sim.title}</span>
+                          <StatusBadge status={sim.status} />
+                          <span class="text-xs text-slate-500">{tr(i18n, "inbox.similarity", { pct: Math.round(sim.similarity * 100) })}</span>
+                          <button type="button" class={drawer.mergeArmed === sim.id ? "btn bg-amber-500 px-2 py-1 text-xs text-white hover:bg-amber-600" : "btn-secondary px-2 py-1 text-xs"} disabled={!!drawer.busy} onClick$={() => merge(sim.id)}>
+                            {drawer.mergeArmed === sim.id ? tr(i18n, "common.confirm") : tr(i18n, "inbox.mergeInto", { number: sim.number })}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                    {drawer.mergeArmed && (
+                      <p class="mt-2 text-xs text-amber-800">
+                        {tr(i18n, "inbox.mergeConfirm", { number: (item.similar ?? []).find((x) => x.id === drawer.mergeArmed)?.number ?? "" })}{" "}
+                        <button type="button" class="underline" onClick$={() => (drawer.mergeArmed = "")}>{tr(i18n, "common.cancel")}</button>
+                      </p>
+                    )}
+                  </div>
+                )}
+
                 {/* Reporter + context */}
                 <dl class="grid gap-x-4 gap-y-2 text-sm sm:grid-cols-[auto_1fr]">
                   {item.reporter_email && (<><dt class="text-slate-500">{tr(i18n, "common.email")}</dt><dd class="break-all text-slate-800"><a href={`mailto:${item.reporter_email}`} class="text-primary-600 hover:underline">{item.reporter_email}</a></dd></>)}
@@ -542,10 +756,22 @@ export default component$(() => {
                   <h3 class="font-semibold text-slate-900">{tr(i18n, "inbox.notes")}</h3>
                   <ul class="mt-2 space-y-2">
                     {(item.notes ?? []).map((n) => (
-                      <li key={n.id} class="rounded-lg bg-slate-50 p-3 text-sm">
-                        <div class="flex items-center justify-between text-xs text-slate-500">
-                          <span>{n.author?.email ?? tr(i18n, "audit.system")} · {fmtDateTime(n.created_at, i18n.lang)}</span>
-                          <button type="button" class="text-red-600 hover:underline" onClick$={() => deleteNote(n.id)}>{tr(i18n, "common.delete")}</button>
+                      <li key={n.id} class={["rounded-lg p-3 text-sm", n.kind === "reply" ? "border border-primary-200 bg-primary-50" : "bg-slate-50"]}>
+                        <div class="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
+                          <span>
+                            {n.kind === "reply" && (
+                              <span class="badge mr-1 bg-primary-100 text-primary-800">
+                                ✉ {tr(i18n, "inbox.replyBadge")}
+                                {n.delivery && (
+                                  <span class={["ml-1", n.delivery === "failed" ? "text-red-700" : n.delivery === "sent" ? "text-green-700" : "text-amber-700"]}>
+                                    · {n.delivery === "sent" ? tr(i18n, "inbox.deliverySent") : n.delivery === "failed" ? tr(i18n, "inbox.deliveryFailed") : tr(i18n, "inbox.deliveryPending")}
+                                  </span>
+                                )}
+                              </span>
+                            )}
+                            {n.author?.email ?? n.author?.label ?? tr(i18n, "audit.system")} · {fmtDateTime(n.created_at, i18n.lang)}
+                          </span>
+                          {n.kind !== "reply" && <button type="button" class="text-red-600 hover:underline" onClick$={() => deleteNote(n.id)}>{tr(i18n, "common.delete")}</button>}
                         </div>
                         <p class="mt-1 whitespace-pre-wrap text-slate-800">{n.body}</p>
                       </li>
@@ -556,6 +782,28 @@ export default component$(() => {
                     <input type="text" class="input" placeholder={tr(i18n, "inbox.notePlaceholder")} value={drawer.note} onInput$={(_, el) => (drawer.note = el.value)} />
                     <button type="submit" class="btn-secondary" disabled={!!drawer.busy || !drawer.note.trim()}>{tr(i18n, "inbox.addNote")}</button>
                   </form>
+                </div>
+
+                {/* Reply to the reporter */}
+                <div class="rounded-lg border border-slate-200 p-3" data-testid="reply">
+                  <h3 class="font-semibold text-slate-900">{tr(i18n, "inbox.replyTitle")}</h3>
+                  {!item.reporter_email ? (
+                    <p class="mt-1 text-sm text-slate-500">{tr(i18n, "inbox.replyNoEmail")}</p>
+                  ) : !mailOn ? (
+                    <p class="mt-1 text-sm text-slate-500">{tr(i18n, "inbox.replyMailOff")}</p>
+                  ) : (
+                    <form class="mt-2 space-y-2" preventdefault:submit onSubmit$={sendReply}>
+                      <p class="text-xs text-slate-500">{tr(i18n, "inbox.replyBody")}</p>
+                      <textarea class="input" rows={3} placeholder={tr(i18n, "inbox.replyPlaceholder")} value={drawer.reply} onInput$={(_, el) => (drawer.reply = el.value)} />
+                      {drawer.replyError && <p class="text-sm text-red-600">{drawer.replyError}</p>}
+                      <div class="flex items-center justify-between gap-2">
+                        <span class="truncate text-xs text-slate-500">→ {item.reporter_email}</span>
+                        <button type="submit" class="btn-primary" disabled={!!drawer.busy || !drawer.reply.trim()}>
+                          {drawer.busy === "reply" ? tr(i18n, "common.sending") : tr(i18n, "common.send")}
+                        </button>
+                      </div>
+                    </form>
+                  )}
                 </div>
 
                 {/* Delete */}

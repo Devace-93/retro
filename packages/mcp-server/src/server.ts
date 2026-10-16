@@ -7,7 +7,8 @@
  *   which tools are *registered* (hidden tools are never listed), each handler
  *   re-checks its scopes at call time, and the REST API enforces the same
  *   scopes independently. See `rbac.ts`.
- * - **Human approval for destructive actions.** The four `delete_*` tools ask
+ * - **Human approval for destructive actions.** The four `delete_*` tools and
+ *   `merge_feedback` ask
  *   the user through MCP *elicitation* when the client supports it (Claude
  *   Code, the Inspector). Otherwise they refuse until the model passes
  *   `confirm: true`, which forces the model to ask the user first.
@@ -27,7 +28,7 @@ import { z } from "zod";
 import { compactArgs, type AuditEntry, type AuditOutcome, type AuditSink } from "./audit.js";
 import { RetroApiError, type RetroClient } from "./client.js";
 import { TOOL_SCOPES, hasAllScopes, type ToolName } from "./rbac.js";
-import type { ChangelogEntry, FeedbackItem, KeyInfo, Project, RoadmapItem, Scope } from "./types.js";
+import type { ChangelogEntry, FeedbackItem, KeyInfo, Project, RoadmapItem, Scope, Webhook } from "./types.js";
 import { VERSION } from "./version.js";
 
 export interface RetroServerOptions {
@@ -95,8 +96,17 @@ const projectObject = z.looseObject({
 const noteObject = z.looseObject({
   id: z.string(),
   body: z.string(),
-  author: z.looseObject({ id: z.string(), email: z.string() }).nullable().optional(),
+  author: z.looseObject({ id: z.string().nullable(), email: z.string().nullable(), label: z.string().optional() }).nullable().optional(),
+  kind: z.enum(["note", "reply"]).optional(),
+  delivery: z.enum(["pending", "sent", "failed"]).nullable().optional(),
   created_at: z.string(),
+});
+const similarObject = z.looseObject({
+  id: z.string(),
+  number: z.number(),
+  title: z.string(),
+  status: z.enum(FEEDBACK_STATUSES),
+  similarity: z.number(),
 });
 const screenshotObject = z.looseObject({
   content_type: z.string(),
@@ -127,6 +137,8 @@ const feedbackObject = z.looseObject({
   screenshot: screenshotObject.nullable().optional(),
   roadmap_item_id: z.string().nullable(),
   notes: z.array(noteObject).optional(),
+  similar: z.array(similarObject).optional(),
+  duplicate_of: z.string().nullable().optional(),
   created_at: z.string(),
   updated_at: z.string(),
 });
@@ -172,6 +184,49 @@ const usageObject = z.looseObject({
   attachment_bytes: z.number(),
   counts: z.looseObject({ projects: z.number(), api_keys: z.number() }),
   limits: z.record(z.string(), z.unknown()),
+});
+const WEBHOOK_EVENTS = ["feedback.created", "feedback.status_changed", "roadmap.status_changed", "changelog.published", "ping"] as const;
+const savedViewFilters = z.looseObject({
+  q: z.string().optional(),
+  type: z.string().optional(),
+  status: z.string().optional(),
+  sentiment: z.enum(SENTIMENTS).optional(),
+  priority: z.enum(PRIORITIES).optional(),
+  tag: z.string().optional(),
+  has_screenshot: z.boolean().optional(),
+  sort: z.enum(["newest", "oldest", "votes"]).optional(),
+});
+const savedViewObject = z.looseObject({
+  id: z.string(),
+  name: z.string(),
+  filters: savedViewFilters,
+  position: z.number(),
+  created_at: z.string(),
+});
+const webhookObject = z.looseObject({
+  id: z.string(),
+  url: z.string(),
+  events: z.array(z.string()),
+  description: z.string().nullable().optional(),
+  enabled: z.boolean(),
+  secret_prefix: z.string(),
+  secret: z.string().optional().describe("Full signing secret. ONLY returned on create; store it now."),
+  last_delivery_at: z.string().nullable(),
+  last_status: z.string().nullable(),
+  created_at: z.string(),
+});
+const notificationObject = z.looseObject({
+  email_new_feedback: z.boolean(),
+  email_digest_minutes: z.number(),
+  email: z.string(),
+});
+const exportObject = z.looseObject({
+  format: z.string(),
+  exported_at: z.string(),
+  project: z.looseObject({ key: z.string(), name: z.string() }),
+  feedback: z.array(feedbackObject),
+  roadmap: z.array(roadmapObject),
+  changelog: z.array(changelogObject),
 });
 const auditEventObject = z.looseObject({
   id: z.string(),
@@ -359,8 +414,10 @@ export function createRetroServer(opts: RetroServerOptions): McpServer {
     what: string,
     toolName: ToolName,
     cancelled: Record<string, unknown>,
+    verb: "delete" | "merge" = "delete",
   ): Promise<Wrapped | null> {
     if (confirm) return null;
+    const noun = verb === "merge" ? "Merge" : "Deletion";
     const canAsk = allowElicitation && Boolean(server.server.getClientCapabilities()?.elicitation);
     if (canAsk) {
       const answer = await server.server.elicitInput({
@@ -368,14 +425,14 @@ export function createRetroServer(opts: RetroServerOptions): McpServer {
         message: `${what} This cannot be undone.`,
         requestedSchema: {
           type: "object",
-          properties: { confirm: { type: "boolean", title: "Yes, delete it", default: false } },
+          properties: { confirm: { type: "boolean", title: `Yes, ${verb} it`, default: false } },
           required: ["confirm"],
         },
       });
       if (answer.action === "accept" && answer.content?.confirm === true) return null;
       return {
         outcome: "cancelled",
-        result: structured(cancelled, "Deletion was cancelled by the user. Nothing was changed."),
+        result: structured(cancelled, `${noun} was cancelled by the user. Nothing was changed.`),
       };
     }
     return {
@@ -549,6 +606,7 @@ export function createRetroServer(opts: RetroServerOptions): McpServer {
         page: z.number().int().min(1).default(1),
         per_page: z.number().int().min(1).max(200).default(50),
         sort: z.enum(["newest", "oldest", "votes"]).default("newest"),
+      duplicates: z.enum(["show", "hide"]).optional().describe("hide = omit items merged into another one (Phase 2)."),
       },
       outputSchema: z.looseObject({ items: z.array(feedbackObject), page: z.number(), per_page: z.number(), total: z.number() }),
       annotations: { readOnlyHint: true, idempotentHint: true },
@@ -586,8 +644,13 @@ export function createRetroServer(opts: RetroServerOptions): McpServer {
       ]
         .filter(Boolean)
         .join(" · ");
-      const notes = (f.notes ?? []).map((n) => `  - ${n.created_at} ${n.author?.email ?? "?"}: ${n.body}`).join("\n");
-      return structured({ ...f }, `${describeItem(f)}\n${meta}\n\n${f.message}\n${notes ? `\nNotes:\n${notes}` : ""}`);
+      const notes = (f.notes ?? []).map((n) => `  - ${n.created_at} ${n.author?.email ?? n.author?.label ?? "?"}${n.kind === "reply" ? ` (reply, ${n.delivery ?? "?"})` : ""}: ${n.body}`).join("\n");
+      const similar = (f.similar ?? []).map((x) => `  - #${x.number} "${truncate(x.title, 60)}" (${x.status}, similarity ${x.similarity.toFixed(2)})`).join("\n");
+      const dup = f.duplicate_of ? `\nDuplicate of item id ${f.duplicate_of}.` : "";
+      return structured(
+        { ...f },
+        `${describeItem(f)}\n${meta}${dup}\n\n${f.message}\n${notes ? `\nNotes:\n${notes}` : ""}${similar ? `\nPossible duplicates:\n${similar}` : ""}`,
+      );
     },
   );
 
@@ -953,6 +1016,213 @@ export function createRetroServer(opts: RetroServerOptions): McpServer {
           `${e.ts} ${e.outcome.padEnd(6)} ${e.action} by ${e.actor_type}${e.actor_label ? `:${e.actor_label}` : ""}${e.target_id ? ` → ${e.target_type}:${e.target_id}` : ""}`,
       );
       return structured({ items }, lines.join("\n") || "No audit events.");
+    },
+  );
+
+
+  // ------------------------------------------------------------------------- //
+  // Phase 2: export, replies, merge, saved views, webhooks, notifications
+  // ------------------------------------------------------------------------- //
+  tool(
+    "export_project",
+    {
+      title: "Export project",
+      description:
+        "Export one project: `json` returns the portable retro.project.v1 document (feedback with notes, roadmap, changelog; screenshots excluded), `csv` returns the feedback items as CSV text. Use json to back up or migrate, csv for spreadsheets.",
+      inputSchema: {
+        project_id: projectId,
+        format: z.enum(["json", "csv"]).default("json").describe("json (default) | csv."),
+      },
+      outputSchema: z.looseObject({ format: z.string(), export: exportObject.optional(), csv: z.string().optional(), rows: z.number().optional() }),
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    async ({ project_id, format }) => {
+      if (format === "csv") {
+        const csv = await client.exportProject(project_id, "csv");
+        const rows = Math.max(0, csv.split(/\r?\n/).filter((l) => l.trim()).length - 1);
+        return structured({ format: "csv", csv, rows }, `${rows} feedback item(s) as CSV:\n${csv}`);
+      }
+      const doc = await client.exportProject(project_id, "json");
+      return structured(
+        { format: "json", export: doc },
+        `${doc.format} for "${doc.project.name}" exported at ${doc.exported_at}: ${doc.feedback.length} feedback item(s), ${doc.roadmap.length} roadmap item(s), ${doc.changelog.length} changelog entries.`,
+      );
+    },
+  );
+
+  tool(
+    "reply_to_reporter",
+    {
+      title: "Reply to the reporter",
+      description:
+        "Email a reply to the person who submitted a feedback item (requires the item to carry a reporter email and outbound mail to be enabled on the server). The reply is stored as a note of kind \"reply\" and the reporter can answer the account owner directly. Draft the text with the user first; it is sent as-is.",
+      inputSchema: {
+        project_id: projectId,
+        item: itemRef,
+        body: z.string().min(1).max(5000).describe("Plain-text reply. The original message is quoted below it automatically."),
+      },
+      outputSchema: noteObject,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    },
+    async ({ project_id, item, body }) => {
+      const note = await client.reply(project_id, refOf(item), body);
+      return structured({ ...note }, `Reply queued (${note.delivery ?? "pending"}) as note ${note.id}.`);
+    },
+  );
+
+  tool(
+    "merge_feedback",
+    {
+      title: "Merge duplicate feedback",
+      description:
+        "Mark a feedback item as a duplicate of another one in the same project: the item becomes declined with duplicate_of set, its tags are copied onto the target, a system note is added there and its reporter joins the target's watchers. Use get_feedback first: it lists possible duplicates with a similarity score. The user must confirm: when the client supports it you will be prompted; otherwise ask the user explicitly and call again with confirm=true.",
+      inputSchema: {
+        project_id: projectId,
+        item: itemRef.describe("The duplicate (the item that gets closed)."),
+        into: itemRef.describe("The item to keep (id or number)."),
+        confirm: confirmFlag.describe("Set to true only after the user explicitly confirmed this specific merge."),
+      },
+      outputSchema: z.looseObject({ merged: z.boolean(), item: feedbackObject.optional(), id: z.string(), number: z.number(), into: z.string() }),
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
+    },
+    async ({ project_id, item, into, confirm }) => {
+      const [dup, target] = await Promise.all([client.getFeedback(project_id, refOf(item)), client.getFeedback(project_id, refOf(into))]);
+      if (dup.id === target.id) return failure("invalid_merge", "An item cannot be merged into itself.");
+      const refusal = await confirmOrRefuse(
+        confirm,
+        `Merge feedback #${dup.number} "${truncate(dup.title, 60)}" into #${target.number} "${truncate(target.title, 60)}"? #${dup.number} will be closed as a duplicate.`,
+        "merge_feedback",
+        { merged: false, id: dup.id, number: dup.number, into: target.id },
+        "merge",
+      );
+      if (refusal) return refusal;
+      const merged = await client.merge(project_id, dup.id, target.id);
+      return structured(
+        { merged: true, item: merged, id: merged.id, number: merged.number, into: target.id },
+        `Merged #${dup.number} into #${target.number}: #${dup.number} is now ${merged.status} (duplicate_of=${target.id}).`,
+      );
+    },
+  );
+
+  tool(
+    "list_saved_views",
+    {
+      title: "List saved views",
+      description: "Saved inbox filter presets of a project (name + filters). Apply one by passing its filters to list_feedback.",
+      inputSchema: { project_id: projectId },
+      outputSchema: z.looseObject({ items: z.array(savedViewObject) }),
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    async ({ project_id }) => {
+      const items = await client.listViews(project_id);
+      const lines = items.map((v) => `- ${v.name} (${v.id}): ${JSON.stringify(v.filters)}`);
+      return structured({ items }, lines.join("\n") || "No saved views.");
+    },
+  );
+
+  tool(
+    "create_saved_view",
+    {
+      title: "Create saved view",
+      description: "Save a set of inbox filters under a name so the dashboard (and other agents) can reapply it. Max 20 per project.",
+      inputSchema: {
+        project_id: projectId,
+        name: z.string().min(1).max(60),
+        filters: savedViewFilters.describe("Same keys as list_feedback: q, type, status (comma-separated lists allowed), sentiment, priority, tag, has_screenshot, sort."),
+      },
+      outputSchema: savedViewObject,
+      annotations: { readOnlyHint: false, idempotentHint: false },
+    },
+    async ({ project_id, name, filters }) => {
+      const v = await client.createView(project_id, { name, filters });
+      return structured({ ...v }, `Saved view "${v.name}" (id=${v.id}).`);
+    },
+  );
+
+  const describeWebhook = (w: Webhook) =>
+    `${w.enabled ? "on " : "off"} ${w.url} [${w.events.join(", ")}] id=${w.id} secret=${w.secret_prefix}…${w.last_status ? ` last=${w.last_status} ${w.last_delivery_at ?? ""}` : ""}`;
+
+  tool(
+    "list_webhooks",
+    {
+      title: "List webhooks",
+      description: "Webhook endpoints of a project with their events, enabled flag, secret prefix and last delivery status.",
+      inputSchema: { project_id: projectId },
+      outputSchema: z.looseObject({ items: z.array(webhookObject) }),
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    async ({ project_id }) => {
+      const items = await client.listWebhooks(project_id);
+      return structured({ items }, items.map(describeWebhook).join("\n") || "No webhooks.");
+    },
+  );
+
+  tool(
+    "create_webhook",
+    {
+      title: "Create webhook",
+      description:
+        "Register an HTTPS endpoint that receives signed JSON events (X-Retro-Signature: sha256=HMAC of the body with the secret). Events default to all: feedback.created, feedback.status_changed, roadmap.status_changed, changelog.published. The signing secret is returned ONCE.",
+      inputSchema: {
+        project_id: projectId,
+        url: z.url().describe("https:// endpoint (http only on local self-host)."),
+        events: z.array(z.enum(WEBHOOK_EVENTS)).min(1).optional(),
+        description: z.string().max(200).optional(),
+      },
+      outputSchema: webhookObject,
+      annotations: { readOnlyHint: false, idempotentHint: false },
+    },
+    async ({ project_id, ...input }) => {
+      const w = await client.createWebhook(project_id, input);
+      return structured({ ...w }, `Webhook created: ${describeWebhook(w)}\nSecret (shown once): ${w.secret ?? "(not returned)"}`);
+    },
+  );
+
+  tool(
+    "test_webhook",
+    {
+      title: "Test webhook",
+      description: "Queue a `ping` delivery to one webhook so the receiver can verify its signature handling. Returns the delivery id; check the result with list_webhooks (last_status) after a few seconds.",
+      inputSchema: { project_id: projectId, webhook_id: z.uuid() },
+      outputSchema: z.looseObject({ delivery_id: z.string() }),
+      annotations: { readOnlyHint: false, idempotentHint: false },
+    },
+    async ({ project_id, webhook_id }) => {
+      const r = await client.testWebhook(project_id, webhook_id);
+      return structured({ ...r }, `Ping queued, delivery ${r.delivery_id}.`);
+    },
+  );
+
+  tool(
+    "get_notification_settings",
+    {
+      title: "Notification settings",
+      description: "Whether the account owner is emailed about new feedback and how often (0 = one mail per item, 15 / 60 / 1440 = digest minutes).",
+      inputSchema: {},
+      outputSchema: notificationObject,
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    async () => {
+      const n = await client.notificationSettings();
+      return structured({ ...n }, `New-feedback email ${n.email_new_feedback ? "ON" : "OFF"}, digest every ${n.email_digest_minutes} min, to ${n.email}.`);
+    },
+  );
+
+  tool(
+    "update_notification_settings",
+    {
+      title: "Update notification settings",
+      description: "Turn new-feedback emails on/off or change the digest window (0 = instant, 15, 60 or 1440 minutes).",
+      inputSchema: {
+        email_new_feedback: z.boolean().optional(),
+        email_digest_minutes: z.union([z.literal(0), z.literal(15), z.literal(60), z.literal(1440)]).optional(),
+      },
+      outputSchema: notificationObject,
+      annotations: { readOnlyHint: false, idempotentHint: true },
+    },
+    async (patch) => {
+      const n = await client.updateNotificationSettings(patch);
+      return structured({ ...n }, `New-feedback email ${n.email_new_feedback ? "ON" : "OFF"}, digest every ${n.email_digest_minutes} min.`);
     },
   );
 

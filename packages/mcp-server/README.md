@@ -81,6 +81,10 @@ and a bug in the server can hide access but never grant it.
 | `list_roadmap`           | `board:read`                     | ✓ | ✓ | ✓ | includes hidden items |
 | `list_changelog`         | `board:read`                     | ✓ | ✓ | ✓ | drafts first |
 | `get_usage`              | `usage:read`                     | ✓ | ✓ | ✓ | feedback / storage / counts vs. plan limits |
+| `export_project`         | `feedback:read` + `board:read`   | ✓ | ✓ | ✓ | `retro.project.v1` JSON or feedback CSV |
+| `list_saved_views`       | `feedback:read`                  | ✓ | ✓ | ✓ | inbox filter presets |
+| `list_webhooks`          | `projects:read`                  | ✓ | ✓ | ✓ | events, enabled flag, last delivery |
+| `get_notification_settings` | `usage:read`                  | ✓ | ✓ | ✓ | new-feedback email + digest window |
 | `create_project`         | `projects:write`                 |   | ✓ | ✓ | returns the public key + widget snippet |
 | `update_project`         | `projects:write`                 |   | ✓ | ✓ | board slug / enabled, types, screenshots, accent… |
 | `rotate_project_key`     | `projects:write`                 |   | ✓ | ✓ | old key stops working immediately |
@@ -91,6 +95,12 @@ and a bug in the server can hide access but never grant it.
 | `update_roadmap_item`    | `board:write`                    |   | ✓ | ✓ | `done` cascades to linked feedback |
 | `create_changelog_entry` | `board:write`                    |   | ✓ | ✓ | draft unless `publish=true` |
 | `update_changelog_entry` | `board:write`                    |   | ✓ | ✓ | publish / unpublish |
+| `reply_to_reporter`      | `feedback:write`                 |   | ✓ | ✓ | emails the reporter; stored as a `reply` note |
+| `merge_feedback`         | `feedback:write`                 |   | ✓ | ✓ | **confirmation required**; closes the duplicate |
+| `create_saved_view`      | `feedback:write`                 |   | ✓ | ✓ | max 20 per project |
+| `create_webhook`         | `projects:write`                 |   | ✓ | ✓ | returns the signing secret once |
+| `test_webhook`           | `projects:write`                 |   | ✓ | ✓ | queues a `ping` delivery |
+| `update_notification_settings` | `projects:write`           |   | ✓ | ✓ | 0 / 15 / 60 / 1440 minutes |
 | `delete_project`         | `projects:delete`                |   |   | ✓ | **confirmation required** |
 | `delete_feedback`        | `feedback:delete`                |   |   | ✓ | **confirmation required** |
 | `delete_roadmap_item`    | `board:delete`                   |   |   | ✓ | **confirmation required** |
@@ -107,16 +117,18 @@ status / priority / tags, roadmap drafts — and makes it ask before applying).
 
 ## Human approval for destructive actions
 
-The four `delete_*` tools are irreversible, so they never run on the model's
-say-so alone:
+The four `delete_*` tools are irreversible, and `merge_feedback` closes an item
+as a duplicate, so they never run on the model's say-so alone:
 
 - On hosts that support MCP **elicitation** (Claude Code, Inspector) the user
-  gets a native confirmation dialog showing exactly what will be deleted.
+  gets a native confirmation dialog showing exactly what will be deleted (or
+  merged into what).
 - On hosts that don't (and always over HTTP, which is stateless), the tool
   refuses with `confirmation_required` until the model calls it again with
   `confirm: true` — which it can only honestly do after asking the user.
 
-`rotate_project_key` is not gated but is marked destructive: every widget
+`reply_to_reporter` is not gated either, but it sends an email the moment it is
+called: draft the text with the user first. `rotate_project_key` is not gated but is marked destructive: every widget
 snippet using the previous key stops working the moment it runs. Prefer
 `update_feedback` with `status: declined` over `delete_feedback`, and
 `public: false` / `published: false` over deleting board items.

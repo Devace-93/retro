@@ -16,6 +16,7 @@ from sqlalchemy import func, select, update
 from dbcore import audit
 from dbcore.config import config
 from dbcore.db import session_scope
+from dbcore.events import emit
 from dbcore.feedback import ROADMAP_STATUSES
 from dbcore.models import Account, FeedbackItem, RoadmapItem
 from dbcore.plans import effective_plan_limits, within_limit
@@ -23,7 +24,7 @@ from dbcore.plans import effective_plan_limits, within_limit
 from ..auth_utils import actor, require_auth_or_api_key, require_scope
 from ..errors import ApiError
 from ..extensions import limiter, public_api_key_func
-from ..serializers import json_body, serialize_roadmap_item
+from ..serializers import serialize_feedback, json_body, serialize_roadmap_item
 from .feedback import ROADMAP_TO_FEEDBACK
 from .projects import get_owned_project, limit_reached
 
@@ -163,18 +164,21 @@ def patch_roadmap_item(project_id, rid):
         if "public" in data:
             item.public = bool(data.get("public"))
             fields.append("public")
+        previous_status: str | None = None
+        linked_changes: list[tuple] = []
         if "status" in data:
             status = _validate_status(data.get("status"))
             if status != item.status:
+                previous_status = item.status
                 item.status = status
                 item.position = _next_position(session, project.id, status)
                 item.completed_at = datetime.now(timezone.utc) if status == "done" else None
-                # Linked feedback follows the card.
-                session.execute(
-                    update(FeedbackItem)
-                    .where(FeedbackItem.roadmap_item_id == item.id)
-                    .values(status=ROADMAP_TO_FEEDBACK[status])
-                )
+                # Linked feedback follows the card (and each change is an event).
+                linked = session.scalars(select(FeedbackItem).where(FeedbackItem.roadmap_item_id == item.id)).all()
+                for fb in linked:
+                    if fb.status != ROADMAP_TO_FEEDBACK[status]:
+                        linked_changes.append((fb, fb.status))
+                        fb.status = ROADMAP_TO_FEEDBACK[status]
             fields.append("status")
 
         audit.record(
@@ -188,7 +192,14 @@ def patch_roadmap_item(project_id, rid):
         )
         session.flush()
         session.refresh(item)
-        body = serialize_roadmap_item(item, feedback_counts(session, [item.id]).get(item.id, 0))
+        count = feedback_counts(session, [item.id]).get(item.id, 0)
+        if previous_status is not None:
+            emit(session, project, "roadmap.status_changed",
+                 {**serialize_roadmap_item(item, count), "previous_status": previous_status})
+            for fb, prev in linked_changes:
+                session.refresh(fb)
+                emit(session, project, "feedback.status_changed", {**serialize_feedback(fb), "previous_status": prev})
+        body = serialize_roadmap_item(item, count)
     return jsonify(body)
 
 

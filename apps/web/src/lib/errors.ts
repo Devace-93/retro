@@ -1,6 +1,6 @@
 /**
  * Error → user-facing message. 402 `limit_reached` gets a specific line per
- * `error.which` (projects | api_keys | roadmap_items); every other API error
+ * `error.which` (projects | api_keys | roadmap_items | webhooks); every other API error
  * shows the backend message; anything else (network) the fallback.
  */
 import { ApiRequestError } from "./api";
@@ -11,6 +11,7 @@ const LIMIT_KEYS: Record<string, CatalogKey> = {
   projects: "limit.projects",
   api_keys: "limit.api_keys",
   roadmap_items: "limit.roadmap_items",
+  webhooks: "limit.webhooks",
 };
 
 export function isLimitError(e: unknown): e is ApiRequestError {

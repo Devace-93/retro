@@ -1,9 +1,11 @@
 """Feedback blueprint (management): the inbox.
 
 List / read / triage (status, priority, tags) / notes / promote to the roadmap
-/ screenshot bytes. Accepts a dashboard JWT or a management API key; every
-query is scoped through ``get_owned_project`` so a foreign project is a 404.
-Mutations are audited in the same transaction.
+/ screenshot bytes, plus (Phase 2) replies to the reporter, duplicate merging
+and the ``similar`` list on the detail. Accepts a dashboard JWT or a
+management API key; every query is scoped through ``get_owned_project`` so a
+foreign project is a 404. Mutations are audited in the same transaction, and
+status changes are emitted to the project's webhooks through the outbox.
 """
 from __future__ import annotations
 
@@ -17,14 +19,18 @@ from sqlalchemy.orm import selectinload
 from dbcore import audit
 from dbcore.config import config
 from dbcore.db import session_scope
+from dbcore.events import emit
+from dbcore.feature_flags import is_enabled
 from dbcore.feedback import PRIORITIES, SENTIMENTS, STATUSES, TYPES, FeedbackError, clean_tags
 from dbcore.models import Account, Attachment, FeedbackItem, FeedbackNote, RoadmapItem
+from dbcore.outbox import enqueue_reply, mail_available
 from dbcore.plans import effective_plan_limits, within_limit
 
 from ..auth_utils import actor, require_auth_or_api_key, require_scope
 from ..errors import ApiError
 from ..extensions import limiter, public_api_key_func
-from ..serializers import json_body, serialize_feedback, serialize_note, serialize_roadmap_item
+from ..serializers import json_body, serialize_feedback, serialize_note, serialize_roadmap_item, serialize_similar
+from .account import owner_email
 from .projects import get_owned_project, limit_reached
 
 bp = Blueprint("feedback", __name__)
@@ -55,6 +61,30 @@ def get_item(session, project, item_ref: str, *, with_notes: bool = False) -> Fe
     if item is None:
         raise ApiError(404, "not_found", "Feedback item not found.")
     return item
+
+
+def similar_for(session, item: FeedbackItem) -> list[dict]:
+    """Resolve the stored ``similar_ids`` into the detail's ``similar`` list."""
+    ids = []
+    for entry in item.similar_ids or []:
+        try:
+            ids.append(uuid.UUID(str(entry.get("id"))))
+        except (ValueError, AttributeError):
+            continue
+    if not ids:
+        return []
+    rows = session.scalars(select(FeedbackItem).where(FeedbackItem.id.in_(ids))).all()
+    return serialize_similar({str(r.id): r for r in rows}, item.similar_ids)
+
+
+def detail(session, item: FeedbackItem) -> dict:
+    return serialize_feedback(item, with_notes=True, similar=similar_for(session, item))
+
+
+def emit_status_change(session, project, item: FeedbackItem, previous: str) -> None:
+    """``feedback.status_changed`` webhook event (payload = item + previous_status)."""
+    session.refresh(item)
+    emit(session, project, "feedback.status_changed", {**serialize_feedback(item), "previous_status": previous})
 
 
 def _csv(name: str, allowed: tuple) -> list[str]:
@@ -101,6 +131,7 @@ def list_feedback(project_id):
     priorities = _csv("priority", PRIORITIES)
     tag = (request.args.get("tag") or "").strip().lower()
     has_screenshot = (request.args.get("has_screenshot") or "").strip().lower()
+    duplicates = (request.args.get("duplicates") or "show").strip().lower()
     since = _parse_since()
     sort = (request.args.get("sort") or "newest").strip()
     if sort not in ("newest", "oldest", "votes"):
@@ -137,6 +168,8 @@ def list_feedback(project_id):
             stmt = stmt.where(~FeedbackItem.attachment.has())
         if since is not None:
             stmt = stmt.where(FeedbackItem.created_at >= since)
+        if duplicates == "hide":
+            stmt = stmt.where(FeedbackItem.duplicate_of.is_(None))
 
         total = session.scalar(select(func.count()).select_from(stmt.subquery())) or 0
 
@@ -164,7 +197,7 @@ def list_feedback(project_id):
 def get_feedback(project_id, item_ref):
     with session_scope() as session:
         project = get_owned_project(session, project_id)
-        body = serialize_feedback(get_item(session, project, item_ref, with_notes=True), with_notes=True)
+        body = detail(session, get_item(session, project, item_ref, with_notes=True))
     return jsonify(body)
 
 
@@ -181,6 +214,7 @@ def patch_feedback(project_id, item_ref):
         project = get_owned_project(session, project_id)
         item = get_item(session, project, item_ref, with_notes=True)
         meta: dict = {"fields": []}
+        previous_status: str | None = None
 
         if "status" in data:
             status = (data.get("status") or "").strip()
@@ -188,6 +222,7 @@ def patch_feedback(project_id, item_ref):
                 raise ApiError(400, "invalid_status", f"status must be one of: {', '.join(STATUSES)}.")
             if status != item.status:
                 meta["from"], meta["to"] = item.status, status
+                previous_status = item.status
                 item.status = status
             meta["fields"].append("status")
         if "priority" in data:
@@ -249,8 +284,10 @@ def patch_feedback(project_id, item_ref):
             **actor(),
         )
         session.flush()
+        if previous_status is not None:
+            emit_status_change(session, project, item, previous_status)
         session.refresh(item)
-        body = serialize_feedback(item, with_notes=True)
+        body = detail(session, item)
     return jsonify(body)
 
 
@@ -361,7 +398,7 @@ def promote(project_id, item_ref):
         if item.roadmap_item_id is not None:
             existing = session.get(RoadmapItem, item.roadmap_item_id)
             if existing is not None:
-                body = {"item": serialize_feedback(item, with_notes=True), "roadmap_item": serialize_roadmap_item(existing, _linked_count(session, existing.id))}
+                body = {"item": detail(session, item), "roadmap_item": serialize_roadmap_item(existing, _linked_count(session, existing.id))}
                 return jsonify(body), 200
 
         status = (data.get("status") or "planned").strip()
@@ -391,6 +428,7 @@ def promote(project_id, item_ref):
         session.add(roadmap_item)
         session.flush()
         item.roadmap_item_id = roadmap_item.id
+        previous_status = item.status
         if item.status not in ("in_progress", "done"):
             item.status = ROADMAP_TO_FEEDBACK[status]
 
@@ -404,13 +442,127 @@ def promote(project_id, item_ref):
             **actor(),
         )
         session.flush()
+        if item.status != previous_status:
+            emit_status_change(session, project, item, previous_status)
         session.refresh(item)
-        body = {"item": serialize_feedback(item, with_notes=True), "roadmap_item": serialize_roadmap_item(roadmap_item, 1)}
+        body = {"item": detail(session, item), "roadmap_item": serialize_roadmap_item(roadmap_item, 1)}
     return jsonify(body), 201
 
 
 def _linked_count(session, roadmap_item_id) -> int:
     return session.scalar(select(func.count(FeedbackItem.id)).where(FeedbackItem.roadmap_item_id == roadmap_item_id)) or 0
+
+
+# --------------------------------------------------------------------------- #
+# Reply to the reporter (Phase 2)
+# --------------------------------------------------------------------------- #
+@bp.post("/<item_ref>/reply")
+@_public_limit
+@require_auth_or_api_key
+@require_scope("feedback:write")
+def reply(project_id, item_ref):
+    """Store the reply as a note (``kind: reply``) and queue the mail to the
+    reporter (and watchers). ``Reply-To`` is the account owner's email."""
+    data = json_body()
+    body_text = (data.get("body") or "").strip()
+    if not body_text:
+        raise ApiError(400, "missing_body", "body is required.")
+    if len(body_text) > 5000:
+        raise ApiError(400, "too_long", "body must be at most 5000 characters.")
+    with session_scope() as session:
+        project = get_owned_project(session, project_id)
+        item = get_item(session, project, item_ref)
+        if not item.reporter_email:
+            raise ApiError(400, "no_reporter_email", "This item has no reporter email to reply to.")
+        if not mail_available(g.account_id):
+            raise ApiError(503, "mail_disabled", "Outbound mail is not configured on this server.")
+        account = session.get(Account, g.account_id)
+        who = actor()
+        note = FeedbackNote(
+            feedback_id=item.id,
+            author_user_id=who["actor_id"] if who["actor_type"] == "user" else None,
+            author_label=who["actor_label"],
+            body=body_text,
+            kind="reply",
+        )
+        session.add(note)
+        session.flush()
+        enqueue_reply(session, account, item, note, owner_email(session, account.id))
+        audit.record(
+            session,
+            account_id=g.account_id,
+            action="feedback.reply",
+            target_type="feedback",
+            target_id=str(item.id),
+            meta={"number": item.number, "note_id": str(note.id), "to": item.reporter_email},
+            **who,
+        )
+        session.flush()
+        session.refresh(note)
+        body = serialize_note(note)
+    return jsonify(body), 201
+
+
+# --------------------------------------------------------------------------- #
+# Merge duplicates (Phase 2)
+# --------------------------------------------------------------------------- #
+@bp.post("/<item_ref>/merge")
+@_public_limit
+@require_auth_or_api_key
+@require_scope("feedback:write")
+def merge(project_id, item_ref):
+    """Mark ``:item`` as a duplicate of ``into``: declined, linked, its tags
+    and reporter carried onto the target, a system note on the target."""
+    data = json_body()
+    into_ref = str(data.get("into") or "").strip()
+    if not into_ref:
+        raise ApiError(400, "missing_into", "into (feedback id or number) is required.")
+    with session_scope() as session:
+        project = get_owned_project(session, project_id)
+        item = get_item(session, project, item_ref, with_notes=True)
+        target = get_item(session, project, into_ref)
+        if target.id == item.id:
+            raise ApiError(400, "invalid_merge", "An item cannot be merged into itself.")
+        if target.duplicate_of is not None:
+            raise ApiError(400, "invalid_merge", f"#{target.number} is itself a duplicate; merge into its target instead.")
+
+        previous_status = item.status
+        item.duplicate_of = target.id
+        item.status = "declined"
+
+        merged_tags = list(target.tags or [])
+        for tag in item.tags or []:
+            if tag not in merged_tags:
+                merged_tags.append(tag)
+        target.tags = merged_tags[:20]
+
+        watchers = list(target.watchers or [])
+        for email in [item.reporter_email, *(item.watchers or [])]:
+            if email and email != target.reporter_email and email not in watchers:
+                watchers.append(email)
+        target.watchers = watchers
+
+        session.add(
+            FeedbackNote(
+                feedback_id=target.id, author_user_id=None, author_label="system",
+                body=f"Merged #{item.number} ({item.title}) into this item.", kind="note",
+            )
+        )
+        audit.record(
+            session,
+            account_id=g.account_id,
+            action="feedback.merge",
+            target_type="feedback",
+            target_id=str(item.id),
+            meta={"number": item.number, "into": str(target.id), "into_number": target.number},
+            **actor(),
+        )
+        session.flush()
+        if previous_status != "declined":
+            emit_status_change(session, project, item, previous_status)
+        session.refresh(item)
+        body = detail(session, item)
+    return jsonify(body)
 
 
 # --------------------------------------------------------------------------- #
