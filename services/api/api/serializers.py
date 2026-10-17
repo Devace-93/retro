@@ -58,10 +58,16 @@ def board_url(project) -> str | None:
 
 
 def serialize_user(user) -> dict:
+    """The local mirror of an accounts identity (profile fields come from the
+    JWT claims; ``identity_id`` is the id shared by every 3m4 app)."""
     return {
         "id": str(user.id),
+        "identity_id": str(user.identity_id),
         "email": user.email,
         "email_verified": user.email_verified_at is not None,
+        "handle": user.handle,
+        "name": user.name,
+        "avatar_url": user.avatar_url,
         "created_at": iso(user.created_at),
     }
 

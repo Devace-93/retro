@@ -65,28 +65,9 @@ export const app = {
   "sentiment.negative": "Negative",
   "sentiment.neutral": "Neutral",
 
-  // Auth: login
-  "auth.loginTitle": "Log in",
-  "auth.loginSubtitle": "Welcome back to retro.",
-  "auth.loginFailed": "Login failed. Check your email and password.",
-  "auth.loggingIn": "Logging in…",
-  "auth.noAccount": "Don't have an account?",
-  "auth.signUp": "Sign up",
-
-  // Auth: signup
-  "auth.signupTitle": "Create your account",
-  "auth.signupFailed": "Sign up failed. Please try again.",
-  "auth.inviteOnlyTitle": "🔒 Sign-ups are invite-only right now",
-  "auth.inviteOnlyBody": "We're rolling out gradually. Follow along — spots open soon.",
-  "auth.haveAccount": "Already have an account?",
-  "auth.logIn": "Log in",
-  "auth.earlyAccessPitch": "Early access: full access, free. No card required.",
-  "auth.freePitch": "Free forever: {projects} projects & {feedback} feedback submissions / month.",
-  "auth.workspaceName": "Workspace name",
-  "auth.workspacePlaceholder": "Acme Inc.",
-  "auth.passwordHint": "At least 8 characters.",
-  "auth.creatingAccount": "Creating account…",
-  "auth.createAccount": "Create account",
+  // Auth: identity lives at accounts.3m4.net; only the unverified state is rendered here
+  "auth.unverifiedBanner": "Confirm your e-mail address ({email}) to create projects and API keys.",
+  "auth.resendAt": "Verify now",
 
   // 402 limit_reached, per `error.which`
   "limit.projects": "You've reached the project limit of your plan.",

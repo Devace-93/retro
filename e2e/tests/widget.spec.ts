@@ -1,6 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 import { BASE_URL } from "../playwright.config";
-import { createProject, listFeedback, registerAccount, WIDGET_URL } from "../helpers";
+import { createProject, jwtHeaders, listFeedback, registerAccount, WIDGET_URL } from "../helpers";
 
 /**
  * The embeddable widget on a third-party-looking host page. The page is served
@@ -103,7 +103,7 @@ test.describe("widget", () => {
     const account = await registerAccount(request);
     const project = await createProject(request, account);
     await request.patch(`${BASE_URL}/api/projects/${project.id}`, {
-      headers: { Authorization: `Bearer ${account.accessToken}` },
+      headers: jwtHeaders(account),
       data: { types_enabled: ["feedback"] },
     });
 

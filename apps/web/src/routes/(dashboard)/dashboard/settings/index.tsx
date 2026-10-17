@@ -7,6 +7,7 @@ import {
 } from "@builder.io/qwik";
 import { Link, useNavigate, type DocumentHead } from "@builder.io/qwik-city";
 import { api, ApiRequestError } from "../../../../lib/api";
+import { profileUrl } from "../../../../lib/auth";
 import { errorMessage, isLimitError } from "../../../../lib/errors";
 import { FeaturesContext } from "../../../../lib/features";
 import { tr, useI18n } from "../../../../i18n";
@@ -207,6 +208,12 @@ export default component$(() => {
           <p class="mt-1 text-sm text-slate-500">
             {tr(i18n, "keys.usage")}{" "}
             <code class="rounded bg-slate-100 px-1.5 py-0.5 text-xs">X-API-Key: retro_live_…</code>
+          </p>
+          {/* Identity (e-mail, password, avatar, linked logins) is managed at accounts. */}
+          <p class="mt-2 text-sm text-slate-500">
+            <a href={profileUrl()} class="font-medium text-primary-600 hover:underline" data-testid="profile-link">
+              {tr(i18n, "nav.profile")} →
+            </a>
           </p>
 
           {state.error && (
