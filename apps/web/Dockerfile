@@ -31,6 +31,7 @@ RUN bun install --frozen-lockfile || bun install
 # optional — the app degrades gracefully when unset: PostHog no-ops, and the
 # billing page shows a "not configured" notice instead of launching checkout.
 ARG VITE_API_URL=/api
+ARG VITE_ACCOUNTS_URL=http://localhost:8085
 ARG VITE_APP_URL
 ARG VITE_POSTHOG_KEY
 ARG VITE_POSTHOG_HOST=https://us.i.posthog.com
@@ -42,6 +43,7 @@ ARG VITE_RETRO_WIDGET_URL=https://retro.3m4.net/widget.js
 ARG VITE_METRICS_PROJECT_KEY
 ARG VITE_METRICS_TRACKER_URL=https://metrics.3m4.net/m.js
 ENV VITE_API_URL=$VITE_API_URL \
+    VITE_ACCOUNTS_URL=$VITE_ACCOUNTS_URL \
     VITE_APP_URL=$VITE_APP_URL \
     VITE_POSTHOG_KEY=$VITE_POSTHOG_KEY \
     VITE_POSTHOG_HOST=$VITE_POSTHOG_HOST \

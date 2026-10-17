@@ -1,0 +1,26 @@
+[
+  {
+    "file": "/home/enrique/retro/e2e/demo-frames-dogfood/frame-000.png",
+    "hold": 2400
+  },
+  {
+    "file": "/home/enrique/retro/e2e/demo-frames-dogfood/frame-001.png",
+    "hold": 2200
+  },
+  {
+    "file": "/home/enrique/retro/e2e/demo-frames-dogfood/frame-002.png",
+    "hold": 1800
+  },
+  {
+    "file": "/home/enrique/retro/e2e/demo-frames-dogfood/frame-003.png",
+    "hold": 2000
+  },
+  {
+    "file": "/home/enrique/retro/e2e/demo-frames-dogfood/frame-004.png",
+    "hold": 2200
+  },
+  {
+    "file": "/home/enrique/retro/e2e/demo-frames-dogfood/frame-005.png",
+    "hold": 2600
+  }
+]

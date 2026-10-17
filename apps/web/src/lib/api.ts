@@ -2,19 +2,22 @@
  * API client for the retro Flask backend.
  *
  * - Base URL from VITE_API_URL (fallback "/api" — works behind Caddy).
- * - Attaches the bearer access token.
- * - On a 401, transparently refreshes via POST /auth/refresh (once) and retries.
+ * - Credentials included: the accounts `3m4_session` cookie IS the login
+ *   (no bearer tokens in the browser).
+ * - On `401 session_expired` it refreshes once against accounts and retries;
+ *   on `401 no_session` / `invalid_session` it sends the visitor to the hosted
+ *   login page and rejects.
  *
  * Throws `ApiRequestError` (carrying the parsed `error` body + HTTP status) so
- * callers can branch on e.g. 402 limit_reached (`error.which`).
+ * callers can branch on e.g. 402 limit_reached (`error.which`) or 403
+ * email_unverified.
  */
-import { getAccessToken, getRefreshToken, setAccessToken, clearTokens } from "./auth";
+import { loginUrl, session } from "./auth";
 import type {
   ApiError,
   ApiKey,
   ApiKeyRole,
   AuditEvent,
-  AuthResponse,
   Board,
   ChangelogEntry,
   FeedbackItem,
@@ -52,17 +55,18 @@ export class ApiRequestError extends Error {
     this.status = status;
     this.error = error;
   }
+  get isUnverified(): boolean {
+    return this.status === 403 && this.error?.code === "email_unverified";
+  }
 }
 
 interface RequestOptions {
   method?: string;
   body?: unknown;
-  /** Skip attaching/refreshing the bearer token (e.g. login/register). */
+  /** Public endpoint: a missing session must not trigger the login redirect. */
   auth?: boolean;
   /** Extra headers (e.g. X-Retro-Source on board submissions). */
   headers?: Record<string, string>;
-  /** Internal: prevents infinite refresh loops. */
-  _retried?: boolean;
 }
 
 async function parseError(res: Response): Promise<ApiError> {
@@ -75,61 +79,28 @@ async function parseError(res: Response): Promise<ApiError> {
   }
 }
 
-let refreshInFlight: Promise<boolean> | null = null;
-
-async function tryRefresh(): Promise<boolean> {
-  if (refreshInFlight) return refreshInFlight;
-  const refresh_token = getRefreshToken();
-  if (!refresh_token) return false;
-
-  refreshInFlight = (async () => {
-    try {
-      const res = await fetch(`${BASE}/auth/refresh`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ refresh_token }),
-      });
-      if (!res.ok) {
-        clearTokens();
-        return false;
-      }
-      const data = (await res.json()) as { access_token: string };
-      setAccessToken(data.access_token);
-      return true;
-    } catch {
-      return false;
-    } finally {
-      refreshInFlight = null;
-    }
-  })();
-
-  return refreshInFlight;
-}
-
 async function rawFetch(path: string, opts: RequestOptions = {}): Promise<Response> {
-  const { method = "GET", body, auth = true, headers: extra = {}, _retried = false } = opts;
+  const { method = "GET", body, auth = true, headers: extra = {} } = opts;
 
   const headers: Record<string, string> = { ...extra };
   if (body !== undefined) headers["Content-Type"] = "application/json";
-  if (auth) {
-    const token = getAccessToken();
-    if (token) headers["Authorization"] = `Bearer ${token}`;
-  }
 
-  const res = await fetch(`${BASE}${path}`, {
+  // fetchWithSession: credentials included + one transparent refresh on
+  // `401 session_expired`.
+  const res = await session.fetchWithSession(`${BASE}${path}`, {
     method,
     headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
 
-  if (res.status === 401 && auth && !_retried) {
-    const ok = await tryRefresh();
-    if (ok) return rawFetch(path, { ...opts, _retried: true });
-    clearTokens();
-  }
-
   if (!res.ok) {
-    throw new ApiRequestError(res.status, await parseError(res));
+    const error = await parseError(res);
+    if (res.status === 401 && auth && typeof location !== "undefined") {
+      // No usable session (none, invalid, or the refresh failed): go log in.
+      session.invalidate();
+      location.assign(loginUrl());
+    }
+    throw new ApiRequestError(res.status, error);
   }
   return res;
 }
@@ -157,19 +128,7 @@ const b = (slug: string) => `/boards/${enc(slug)}`;
 
 export const api = {
   /* ─── Auth ───────────────────────────────────────────────────────────── */
-  register: (email: string, password: string, account_name?: string) =>
-    apiFetch<AuthResponse>("/auth/register", {
-      method: "POST",
-      auth: false,
-      body: { email, password, account_name },
-    }),
-
-  login: (email: string, password: string) =>
-    apiFetch<AuthResponse>("/auth/login", { method: "POST", auth: false, body: { email, password } }),
-
-  logout: (refresh_token: string) =>
-    apiFetch<void>("/auth/logout", { method: "POST", body: { refresh_token } }),
-
+  /* ─── Auth (identity lives at accounts.3m4.net; this is the tenant view) ── */
   me: () => apiFetch<MeResponse>("/auth/me"),
 
   /* ─── Features (retro's own switches; public, used by anonymous pages) ──── */
