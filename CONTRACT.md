@@ -35,8 +35,28 @@ Frontend tooling is **Bun**. Compose project name is `retro`.
 
 ## Auth
 
-- Dashboard: JWT bearer, `Authorization: Bearer <access_token>`. Access TTL
-  ~30 min; refresh token (opaque, stored hashed) ~30 days.
+- **Identity lives in accounts.3m4.net** (shared by every 3m4 app; contract:
+  `accounts/CONTRACT.md`). Register, log in (password, magic link, Google /
+  GitHub / Microsoft / Discord), verify e-mail, profile, avatar and logout all
+  happen there. This app has no passwords and no refresh tokens.
+- Dashboard: the accounts session JWT (EdDSA) arrives in the `3m4_session`
+  cookie (`Domain=.3m4.net`, 15 min, refreshed by the browser against
+  `${ACCOUNTS_URL}/api/session/refresh`) or as `Authorization: Bearer <jwt>`.
+  The API verifies it locally with the JWKS at
+  `${ACCOUNTS_INTERNAL_URL}/.well-known/jwks.json` (issuer `ACCOUNTS_URL`,
+  audience `3m4`).
+- First request of an unknown `sub` ⇒ just-in-time provisioning: `users`
+  row (`identity_id` = `sub`, email / handle / name / avatar_url mirrored
+  from the claims and refreshed on every request; the outbox worker mails the
+  mirrored `email`) + `accounts` row (`"{handle}'s workspace"`, plan free) +
+  owner membership. Gated by the `signups` switch (403 `signups_disabled`).
+- Errors: 401 `no_session` (nothing presented ⇒ the web app sends the visitor
+  to `${ACCOUNTS_URL}/login?return_to=`), 401 `session_expired` (client
+  refreshes once and retries), 401 `invalid_session`, 403 `email_unverified`
+  (every session route except `GET /auth/me`, which the dashboard uses to
+  render the "verify your e-mail" banner).
+- `/login` and `/signup` on the web app are 302 redirects to the accounts
+  pages with `return_to` set to the dashboard.
 - Management API: API keys, header `X-API-Key: retro_live_…` (maps to an
   account). The MCP server also accepts the key as `Authorization: Bearer`.
 - Ingest API: project **public keys**, header `X-Project-Key: retro_pub_…` or
@@ -58,7 +78,7 @@ rotation). Exception: the public key is also shown in the project settings
 - Every API key has a **role** (`viewer` | `editor` | `admin`). Roles → scopes
   live in `packages/shared/api_key_roles.json` (shared by API, dashboard, MCP).
 - Scopes: `projects:read|write|delete`, `feedback:read|write|delete`,
-  `board:read|write|delete`, `usage:read`, `audit:read`. Dashboard JWT
+  `board:read|write|delete`, `usage:read`, `audit:read`. Dashboard (accounts)
   sessions hold every scope.
 - Each endpoint names its scope. Missing scope → **403**
   `{ "error": { "code": "insufficient_scope", "message", "required_scope", "role" } }`
@@ -114,11 +134,8 @@ tunes the decoded-image cap.
 
 ### Auth
 
-- `POST /auth/register` `{email, password, account_name?}` → `{user, account, access_token, refresh_token}` (201). Gated by feature `signups`.
-- `POST /auth/login` `{email, password}` → `{user, account, access_token, refresh_token}`
-- `POST /auth/refresh` `{refresh_token}` → `{access_token}`
-- `POST /auth/logout` `{refresh_token}` → 204
-- `GET  /auth/me` → `{user, account, plan, limits, usage, counts:{projects}, features}`
+- `GET /auth/me` → `{user: {id, identity_id, email, email_verified, handle, name, avatar_url, created_at}, account, plan, limits, usage, counts:{projects}, features}` — session (verified or not). Everything else about the identity is at accounts.3m4.net (`/api/me`, `/profile`).
+- `GET /features` → `{features}` — public; a valid session cookie upgrades the targeting bucket to the account.
 
 ### Projects
 

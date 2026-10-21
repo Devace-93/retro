@@ -60,7 +60,9 @@ test.describe("public board", () => {
     // The submission form is inline at the bottom of the board (no button to open it).
     await page.goto(`/b/${project.board_slug}`);
     await page.getByLabel(/message|idea|describe/i).first().fill("Please add keyboard shortcuts");
-    await page.getByRole("button", { name: /send|submit/i }).last().click();
+    // Scope to <main>: the dogfood retro widget (a "Send feedback" launcher
+    // outside it) must not be the button we click.
+    await page.getByRole("main").getByRole("button", { name: /send|submit/i }).last().click();
     await expect(page.getByText(/thank/i)).toBeVisible();
 
     const inbox = await listFeedback(request, account, project.id);

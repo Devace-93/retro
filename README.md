@@ -37,7 +37,7 @@ through a role-scoped API and an MCP server. MIT.
 ```
 Caddy (reverse proxy)
  ├─ web   Qwik City (Bun)  landing + /info + /blog + dashboard + public boards (/b/<slug>) + /widget.js
- ├─ api   Flask            auth, projects, ingest, feedback, roadmap, changelog, boards, keys, audit, billing webhooks
+ ├─ api   Flask            session check (accounts.3m4.net), projects, ingest, feedback, roadmap, changelog, boards, keys, audit, billing webhooks
  └─ mcp   Node (MCP)       AI-agent access: tools over the API, RBAC, confirmations, audit
       Postgres (source of truth, screenshots as bytea) · Redis (rate limits)
 ```
@@ -60,7 +60,7 @@ The interface contract is [`CONTRACT.md`](CONTRACT.md); the plan is
 ## Quick start (Docker)
 
 ```bash
-cp .env.example .env        # then edit secrets (JWT_SECRET_KEY, IP_HASH_SECRET, ...)
+cp .env.example .env        # then edit secrets (IP_HASH_SECRET, ...) and point ACCOUNTS_URL at an accounts stack
 make up                     # build + start everything; creates the schema
 # open http://localhost:8082
 ```

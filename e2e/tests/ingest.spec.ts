@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { API_URL, createProject, ingest, listFeedback, registerAccount, TINY_PNG } from "../helpers";
+import { API_URL, createProject, ingest, jwtHeaders, listFeedback, registerAccount, TINY_PNG } from "../helpers";
 
 /**
  * The public ingest API: JSON with the key in a header, form body with the key
@@ -75,7 +75,7 @@ test.describe("ingest API", () => {
     expect(badType.body.error.code).toBe("invalid_type");
 
     const res = await request.patch(`${API_URL}/projects/${project.id}`, {
-      headers: { Authorization: `Bearer ${account.accessToken}` },
+      headers: jwtHeaders(account),
       data: { types_enabled: ["bug"] },
     });
     expect(res.status()).toBe(200);
@@ -84,7 +84,7 @@ test.describe("ingest API", () => {
     expect(disabled.body.error.code).toBe("invalid_type");
   });
 
-  test("screenshot is stored and served to the owner", async ({ request }) => {
+  test("screenshot is stored and served to the owner", async ({ request, playwright }) => {
     const account = await registerAccount(request);
     const project = await createProject(request, account);
     const r = await ingest(
@@ -101,14 +101,19 @@ test.describe("ingest API", () => {
     expect(inbox.items[0]!.source).toBe("widget");
 
     const img = await request.get(`${API_URL}/projects/${project.id}/feedback/${r.body.id}/screenshot`, {
-      headers: { Authorization: `Bearer ${account.accessToken}` },
+      headers: jwtHeaders(account),
     });
     expect(img.status()).toBe(200);
     expect(img.headers()["content-type"]).toMatch(/^image\/png/);
 
-    // Not readable without auth.
-    const anon = await request.get(`${API_URL}/projects/${project.id}/feedback/${r.body.id}/screenshot`);
-    expect(anon.status()).toBe(401);
+    // Not readable without auth: a fresh context has no accounts session cookie.
+    const anonCtx = await playwright.request.newContext();
+    try {
+      const anon = await anonCtx.get(`${API_URL}/projects/${project.id}/feedback/${r.body.id}/screenshot`);
+      expect(anon.status()).toBe(401);
+    } finally {
+      await anonCtx.dispose();
+    }
   });
 
   test("ingest and widget config are CORS-open; widget.js is cacheable", async ({ request }) => {

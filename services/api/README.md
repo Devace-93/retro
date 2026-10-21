@@ -13,7 +13,7 @@ services/api/
 ├── api/
 │   ├── app.py              # create_app() factory + error handlers + health
 │   ├── extensions.py       # Flask-Limiter (Redis-backed); per-key, per-project and per-IP buckets
-│   ├── auth_utils.py       # passwords, JWT, @require_auth / @require_api_key / @require_project_key, @require_scope
+│   ├── auth_utils.py       # accounts session + JIT provisioning, @require_auth / @require_api_key / @require_project_key, @require_scope
 │   ├── features.py         # retro's own switches: @require_feature + GET /api/features
 │   ├── serializers.py      # ORM -> JSON (CONTRACT.md shapes)
 │   ├── errors.py           # ApiError -> {"error": {...}}
@@ -29,8 +29,10 @@ is imported, never re-implemented.
 
 ## Auth
 
-- **Dashboard:** `Authorization: Bearer <JWT>` (HS256, TTL `ACCESS_TOKEN_TTL_MIN`).
-  Refresh tokens are opaque and stored **hashed** (sha256). Passwords: argon2.
+- **Dashboard:** the accounts.3m4.net session — EdDSA JWT in the `3m4_session`
+  cookie or as `Authorization: Bearer <jwt>`, verified locally against the
+  accounts JWKS (`ACCOUNTS_INTERNAL_URL`), users provisioned just-in-time
+  (`dbcore/m4session.py` is vendored from the accounts repo). No passwords here.
 - **Management API:** `X-API-Key: retro_live_...` (or as a bearer token); the
   key's role decides its scopes (`packages/shared/api_key_roles.json`).
 - **Ingest API:** `X-Project-Key: retro_pub_...` (or bearer token, or the
@@ -40,7 +42,7 @@ is imported, never re-implemented.
 
 ## Endpoints (all under `/api`)
 
-- `auth`: `register`, `login`, `refresh`, `logout`, `me`
+- `auth`: `me` (identity itself lives at accounts.3m4.net)
 - `projects`: list/create/get/patch/delete, `:id/rotate-key`, `:id/summary`, `:id/tags`
 - `projects/:id/feedback`: list/get/patch/delete, `:item/notes`, `:item/promote`, `:item/screenshot`
 - `projects/:id/roadmap`: list/create/patch/delete, `reorder`

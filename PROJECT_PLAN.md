@@ -15,7 +15,7 @@ gives each project an inbox, a public roadmap and a changelog.
 | Stack | Same as exp/3m4: Flask API + PostgreSQL + Redis, Qwik City frontend (Bun), MCP server (TS), Caddy, Docker |
 | Domain | `retro.3m4.net`, single host: web + `/api` + `/mcp` + `/widget.js` |
 | Brand | Tailwind **emerald** |
-| Auth | Roll-your-own JWT + refresh tokens; management API keys `retro_live_…` with roles; per-project **public keys** `retro_pub_…` for the ingest API and the widget |
+| Auth | Identity at **accounts.3m4.net** (shared session cookie, verified locally via JWKS, users provisioned just-in-time — migrated 2026-10-16); management API keys `retro_live_…` with roles; per-project **public keys** `retro_pub_…` for the ingest API and the widget |
 | Tenancy | Account is the billing unit; users join via memberships |
 | Model | account → projects → feedback items (+ notes, one screenshot) · roadmap items · changelog entries |
 | Feedback types | `bug`, `feedback` (with sentiment positive/negative/neutral), `feature` |
