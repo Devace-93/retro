@@ -1,7 +1,10 @@
-"""Outbox worker: delivers the side effects the API queued (mail, webhooks).
+"""Outbox worker: delivers the side effects the API queued (mail, webhooks)
+and reconciles billing with payments.3m4.net once a day.
 
-    python -m dbcore.worker          # loop forever (compose `worker` service)
-    python -m dbcore.worker --once   # drain every due job, then exit (tests)
+    python -m dbcore.worker              # loop forever (compose `worker` service)
+    python -m dbcore.worker --once       # drain every due job, then exit (tests)
+    python -m dbcore.worker --reconcile  # pull every subscription changed in the
+                                         # last RECONCILE_WINDOW from payments, exit
 
 Claiming is ``SELECT … FOR UPDATE SKIP LOCKED`` on one due row, so several
 workers can run side by side without double delivery. A job is processed
@@ -27,8 +30,10 @@ from urllib import error, request
 from sqlalchemy import delete, select, text
 
 from . import models  # noqa: F401  (register models)
+from .billing_sync import account_for_identity, apply_entitlements
 from .config import config
 from .db import session_scope
+from .m4pay import M4PayClient, M4PayError
 from .mail import MailError, is_enabled as mail_is_enabled, send as send_mail
 from .models import Account, FeedbackItem, FeedbackNote, Membership, Outbox, Project, User, Webhook, WebhookDelivery
 
@@ -38,6 +43,11 @@ MAX_ATTEMPTS = 8
 BACKOFF_BASE_SECONDS = 60
 BACKOFF_CAP_SECONDS = 2 * 60 * 60
 RETENTION_DAYS = 7
+# Billing reconcile: pull the subscriptions payments changed in the last
+# window, once per interval. The window overlaps the interval so a missed run
+# or a late push is covered by the next one (snapshots are idempotent).
+RECONCILE_INTERVAL_SECONDS = 24 * 60 * 60
+RECONCILE_WINDOW = timedelta(days=2)
 
 
 class JobFailed(Exception):
@@ -287,6 +297,49 @@ def process_webhook(job: dict) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Billing reconcile (pull from payments.3m4.net)
+# --------------------------------------------------------------------------- #
+def payments_client() -> M4PayClient | None:
+    """The service-key client, or None when billing / the key is not configured."""
+    if not config.billing_enabled or not config.payments_service_key:
+        return None
+    return M4PayClient(config.payments_internal_url, app=config.payments_app, service_key=config.payments_service_key)
+
+
+def reconcile_billing(updated_since: datetime | None = None, client: M4PayClient | None = None) -> dict:
+    """Pull every subscription of the app changed since ``updated_since``
+    (default: the last ``RECONCILE_WINDOW``) and apply each snapshot with the
+    same code path as the push webhook. Returns counts: ``applied`` (rows
+    matched to a retro account), ``changed`` (plan flips), ``unknown`` (identities
+    that never signed in here), ``skipped`` (not configured) and ``error``.
+    """
+    client = client or payments_client()
+    if client is None:
+        log.info("billing reconcile skipped: PAYMENTS_SERVICE_KEY not configured")
+        return {"skipped": 1}
+    since = (updated_since or (_now() - RECONCILE_WINDOW)).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    counts = {"applied": 0, "changed": 0, "unknown": 0}
+    try:
+        rows = list(client.subscriptions(updated_since=since))
+    except (M4PayError, OSError) as err:  # requests exceptions are OSError subclasses
+        log.warning("billing reconcile failed: %s", err)
+        return {"error": 1}
+    for row in rows:
+        with session_scope() as session:
+            account = account_for_identity(session, row.get("identity_id"))
+            if account is None:
+                counts["unknown"] += 1
+                continue
+            result = apply_entitlements(session, account, row)
+            counts["applied"] += 1
+            if result["plan"] != result["previous_plan"]:
+                counts["changed"] += 1
+                log.info("billing reconcile: account %s %s -> %s", account.id, result["previous_plan"], result["plan"])
+    log.info("billing reconcile since %s: %s", since, counts)
+    return counts
+
+
+# --------------------------------------------------------------------------- #
 # Dispatch
 # --------------------------------------------------------------------------- #
 def process(job: dict) -> str:
@@ -359,11 +412,16 @@ def main(argv: list[str]) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     once = "--once" in argv
     log.info("retro outbox worker starting (mail %s, poll %.0fs)", "on" if mail_is_enabled() else "off", config.worker_poll_seconds)
+    if "--reconcile" in argv:
+        counts = reconcile_billing()
+        log.info("reconciled: %s", counts)
+        return 0 if "error" not in counts else 1
     if once:
         counts = drain()
         log.info("drained: %s", counts or "nothing due")
         return 0
     last_cleanup = 0.0
+    last_reconcile = 0.0
     while True:
         try:
             counts = drain(limit=100)
@@ -372,6 +430,9 @@ def main(argv: list[str]) -> int:
             if time.time() - last_cleanup > 3600:
                 cleanup()
                 last_cleanup = time.time()
+            if time.time() - last_reconcile > RECONCILE_INTERVAL_SECONDS:
+                reconcile_billing()
+                last_reconcile = time.time()
         except Exception:  # pragma: no cover - keep the loop alive
             log.exception("worker loop error")
         time.sleep(config.worker_poll_seconds)

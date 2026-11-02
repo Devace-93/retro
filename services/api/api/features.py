@@ -4,7 +4,7 @@
 requester. Backend enforcement is the source of truth — the frontend only
 mirrors these switches (delivered via ``/auth/me`` and ``GET /api/features``).
 
-Never gate: the RevenueCat webhook (login happens at accounts.3m4.net). The ingest API is gated by
+Never gate: the payments.3m4.net webhook (login happens at accounts.3m4.net). The ingest API is gated by
 ``ingest-api`` as an emergency kill switch (503), never as a feature gate.
 """
 from __future__ import annotations

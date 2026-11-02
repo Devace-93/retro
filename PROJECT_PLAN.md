@@ -41,7 +41,7 @@ gives each project an inbox, a public roadmap and a changelog.
   to reporter, Cloudflare Turnstile option, webhooks with HMAC signatures and
   deliveries log, export (`retro.project.v1` JSON + CSV), saved views, duplicate
   detection (pg_trgm) with merge. Spec: CONTRACT.md → "Phase 2 addendum".
-- **Phase 3:** billing on (RevenueCat), team members and invitations,
+- **Phase 3:** billing on (payments.3m4.net portal), team members and invitations,
   dogfooding (retro's own widget on every 3m4 app, including retro).
 
 ## 3. Open questions

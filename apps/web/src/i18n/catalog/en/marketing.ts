@@ -278,13 +278,17 @@ export const marketing = {
   "sponsors.emptyTitle": "Your name could be the first on this page.",
   "sponsors.emptyBody": "Every Pro / Supporter subscriber gets a spot here and an embeddable badge.",
   "sponsors.emptyBodyEarly": "Supporter subscriptions open together with paid plans, after early access. Until then every account is free.",
-  "sponsors.tierSupporter": "{tier} supporter",
   "sponsors.badgeTitle": "The supporter badge",
   "sponsors.badgeBody": "Pro supporters get an embeddable badge for their site or README:",
   "sponsors.badgeBodyEarly": "Pro supporters will get an embeddable badge for their site or README:",
   "sponsors.badgeLabel": "retro Supporter",
   "sponsors.readPlans": "Read about the upcoming plans",
   "sponsors.become": "Become a supporter",
+  "sponsors.tierPro": "Pro supporter",
+  "sponsors.tierTeam": "Team supporter",
+  "sponsors.tierDonor": "Supporter",
+  "sponsors.since": "since {date}",
+  "sponsors.donateIntro": "Prefer a one-off? Buy me a coffee — supporters who opt in appear here too.",
 
   // Early-access banner
   "early.bannerTitle": "Early access.",
