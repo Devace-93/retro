@@ -278,6 +278,7 @@ const uk: PartialCatalog = {
   "sponsors.tierPro": "Підтримувач Pro",
   "sponsors.tierTeam": "Підтримувач Team",
   "sponsors.tierDonor": "Підтримувач",
+  "sponsors.viaGithub": "GitHub Sponsors",
   "sponsors.since": "з {date}",
   "sponsors.donateIntro": "Волієте разово? Пригостіть мене кавою — донори, які погодилися, теж з’являються тут.",
   "early.bannerTitle": "Ранній доступ.",

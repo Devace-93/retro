@@ -32,7 +32,12 @@ def _create_table(name: str, *args, **kwargs) -> None:
 def _create_index(index_name: str, table_name: str, *args, **kwargs) -> None:
     existing = {ix["name"] for ix in _inspector().get_indexes(table_name)}
     existing |= {uc["name"] for uc in _inspector().get_unique_constraints(table_name)}
-    if index_name not in existing:
+    # On a fresh database ``cli upgrade`` runs ``create_all`` (current models)
+    # before these migrations, so a column this initial schema indexed may no
+    # longer exist (e.g. ``rc_app_user_id`` → ``stripe_subscription_id``).
+    columns = {c["name"] for c in _inspector().get_columns(table_name)}
+    wanted = args[0] if args else kwargs.get("columns", [])
+    if index_name not in existing and all(c in columns for c in wanted):
         op.create_index(index_name, table_name, *args, **kwargs)
 
 
