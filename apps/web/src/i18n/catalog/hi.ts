@@ -278,6 +278,7 @@ const hi: PartialCatalog = {
   "sponsors.tierPro": "Pro समर्थक",
   "sponsors.tierTeam": "Team समर्थक",
   "sponsors.tierDonor": "समर्थक",
+  "sponsors.viaGithub": "GitHub Sponsors",
   "sponsors.since": "{date} से",
   "sponsors.donateIntro": "एक बार का योगदान पसंद है? मुझे एक कॉफ़ी पिलाएँ — सहमति देने वाले दानदाता भी यहाँ दिखते हैं।",
   "early.bannerTitle": "अर्ली एक्सेस।",
