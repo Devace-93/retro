@@ -1,16 +1,55 @@
-import { component$, useContext } from "@builder.io/qwik";
-import { Link, type DocumentHead } from "@builder.io/qwik-city";
+import { component$, useContext, useVisibleTask$ } from "@builder.io/qwik";
+import { Link, routeLoader$, type DocumentHead } from "@builder.io/qwik-city";
 import { FeaturesContext } from "../../../lib/features";
+import { PAYMENTS_APP, PAYMENTS_URL } from "../../../lib/pay";
+import { fetchSupporters } from "../../../lib/supporters.server";
+import type { Supporter } from "../../../lib/types";
 import { tr, useI18n } from "../../../i18n";
 
-// Supporters are added here (with their permission) as Pro/Team subscriptions
-// come in. Empty until launch brings the first ones.
-const sponsors: { name: string; tier: string; url: string }[] = [];
+/**
+ * Supporters come from payments.3m4.net (`GET /api/public/supporters?app=retro`):
+ * opted-in Pro subscribers and donors, resolved on the server with a short
+ * cache (see lib/supporters.server.ts). The donate button is the portal's
+ * `pay.js` tag, mounted into #support.
+ */
+export const useSupporters = routeLoader$<Supporter[]>(() => fetchSupporters(PAYMENTS_APP));
+
+const TIER_KEY = {
+  team: "sponsors.tierTeam",
+  pro: "sponsors.tierPro",
+  supporter: "sponsors.tierDonor",
+} as const;
+
+function sinceLabel(since: string, lang: string): string {
+  const m = /^(\d{4})-(\d{2})/.exec(since || "");
+  if (!m) return since;
+  return new Date(Number(m[1]), Number(m[2]) - 1, 1).toLocaleDateString(lang, { year: "numeric", month: "short" });
+}
 
 export default component$(() => {
   const features = useContext(FeaturesContext);
   const i18n = useI18n();
+  const supporters = useSupporters();
   const early = features["early-access"];
+  const sponsors = supporters.value;
+
+  // pay.js donate button (CONTRACT.md §10). Injected on the client so it also
+  // runs after client-side navigation (SSR-rendered <script> tags only
+  // execute on a full page load).
+  // eslint-disable-next-line qwik/no-use-visible-task
+  useVisibleTask$(() => {
+    const mount = document.getElementById("support");
+    if (!mount || mount.childElementCount > 0) return;
+    const tag = document.createElement("script");
+    tag.src = `${PAYMENTS_URL}/pay.js`;
+    tag.defer = true;
+    tag.dataset.app = PAYMENTS_APP;
+    tag.dataset.kind = "donate";
+    tag.dataset.mount = "#support";
+    tag.dataset.returnTo = location.href;
+    document.body.appendChild(tag);
+  });
+
   return (
     <div class="mx-auto max-w-4xl px-4 py-16">
       <div class="text-center">
@@ -37,29 +76,39 @@ export default component$(() => {
 
       {sponsors.length > 0 && (
       <div class="mt-12 grid gap-4 sm:grid-cols-2">
-        {sponsors.map((s) => (
-          <a
-            key={s.name}
-            href={s.url}
-            class="card flex items-center justify-between p-5 hover:border-primary-300"
+        {sponsors.map((s, i) => (
+          <div
+            key={`${s.handle ?? s.display_name}-${i}`}
+            class="card flex items-center justify-between gap-3 p-5"
           >
-            <div class="flex items-center gap-3">
-              <span class="grid h-10 w-10 place-items-center rounded-full bg-primary-100 font-bold text-primary-700">
-                {s.name.charAt(0)}
+            <div class="flex min-w-0 items-center gap-3">
+              <span class="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-primary-100 font-bold text-primary-700">
+                {(s.display_name || s.handle || "?").charAt(0).toUpperCase()}
               </span>
-              <span class="font-semibold text-slate-900">{s.name}</span>
+              <div class="min-w-0">
+                <p class="truncate font-semibold text-slate-900">
+                  {s.display_name || s.handle}
+                  {s.handle && <span class="ml-1 font-normal text-slate-400">@{s.handle}</span>}
+                </p>
+                <p class="text-xs text-slate-500">
+                  {tr(i18n, "sponsors.since", { date: sinceLabel(s.since, i18n.lang) })}
+                  {s.message ? ` · “${s.message}”` : ""}
+                </p>
+              </div>
             </div>
             <span
               class={[
-                "badge",
-                s.tier === "Team"
+                "badge shrink-0",
+                s.tier === "team"
                   ? "bg-primary-600 text-white"
-                  : "bg-primary-100 text-primary-700",
+                  : s.tier === "pro"
+                    ? "bg-primary-100 text-primary-700"
+                    : "bg-slate-100 text-slate-600",
               ]}
             >
-              {tr(i18n, "sponsors.tierSupporter", { tier: s.tier })}
+              {tr(i18n, TIER_KEY[s.tier] ?? "sponsors.tierDonor")}
             </span>
-          </a>
+          </div>
         ))}
       </div>
       )}
@@ -80,13 +129,24 @@ export default component$(() => {
         </div>
       </div>
 
+      {/* One-off support: the portal's pay.js donate button */}
+      <div class="mt-10 card p-6 text-center">
+        <p class="text-sm text-slate-600">{tr(i18n, "sponsors.donateIntro")}</p>
+        <div id="support" class="mt-4 flex justify-center" />
+        <noscript>
+          <a href={`${PAYMENTS_URL}/donate?app=${PAYMENTS_APP}`} class="btn-secondary mt-4">
+            {tr(i18n, "billing.donate")}
+          </a>
+        </noscript>
+      </div>
+
       <div class="mt-10 text-center">
         {early ? (
           <Link href="/blog/what-paid-plans-will-include" class="btn-primary">
             {tr(i18n, "sponsors.readPlans")}
           </Link>
         ) : (
-          <Link href="/signup" class="btn-primary">
+          <Link href="/dashboard/billing" class="btn-primary">
             {tr(i18n, "sponsors.become")}
           </Link>
         )}
@@ -101,7 +161,7 @@ export const head: DocumentHead = {
     {
       name: "description",
       content:
-        "Supporters of retro, the open-source user-feedback service. Pro/Supporter subscribers appear here with a badge.",
+        "Supporters of retro, the open-source user-feedback service. Pro/Supporter subscribers and donors appear here with a badge.",
     },
   ],
 };

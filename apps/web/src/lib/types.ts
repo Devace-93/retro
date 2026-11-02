@@ -54,6 +54,39 @@ export interface MeResponse {
   features?: Record<string, boolean>;
 }
 
+/** `GET /api/billing/status`: the plan + the subscription mirrored from payments.3m4.net. */
+export interface BillingSubscription {
+  id: string | null;
+  entitlement: string | null;
+  product: string | null;
+  period: "monthly" | "annual" | null;
+  /** Stripe status as relayed by payments: active | trialing | past_due | canceled | ... */
+  status: string;
+  active: boolean;
+  current_period_end: string | null;
+  will_renew: boolean;
+  updated_at: string | null;
+}
+
+export interface BillingStatus {
+  plan: PlanKey;
+  label: string;
+  subscription: BillingSubscription | null;
+  payments_url: string;
+  app: string;
+  price_keys: Partial<Record<PlanKey, Record<string, string>>>;
+}
+
+/** One row of `GET {PAYMENTS_URL}/api/public/supporters?app=retro`. */
+export interface Supporter {
+  display_name: string;
+  handle: string | null;
+  tier: "supporter" | "pro" | "team";
+  /** `YYYY-MM` */
+  since: string;
+  message: string | null;
+}
+
 export type FeedbackType = "bug" | "feedback" | "feature";
 export type Sentiment = "positive" | "negative" | "neutral";
 export type FeedbackStatus = "new" | "triaged" | "planned" | "in_progress" | "done" | "declined";

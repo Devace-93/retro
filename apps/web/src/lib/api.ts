@@ -18,6 +18,7 @@ import type {
   ApiKey,
   ApiKeyRole,
   AuditEvent,
+  BillingStatus,
   Board,
   ChangelogEntry,
   FeedbackItem,
@@ -130,6 +131,7 @@ export const api = {
   /* ─── Auth ───────────────────────────────────────────────────────────── */
   /* ─── Auth (identity lives at accounts.3m4.net; this is the tenant view) ── */
   me: () => apiFetch<MeResponse>("/auth/me"),
+  billingStatus: () => apiFetch<BillingStatus>("/billing/status"),
 
   /* ─── Features (retro's own switches; public, used by anonymous pages) ──── */
   features: () => apiFetch<{ features: Record<string, boolean> }>("/features", { auth: false }),

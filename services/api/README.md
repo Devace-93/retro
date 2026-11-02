@@ -3,7 +3,7 @@
 JSON REST API for retro, the user-feedback service. Auth, projects (one per
 host app) with their public keys, the feedback inbox, roadmap and changelog,
 the public ingest API (widget / curl), the public boards, account usage, API
-keys, and (optionally) RevenueCat billing. Mounted at `/api` behind Caddy.
+keys, and (optionally) billing through the payments.3m4.net portal. Mounted at `/api` behind Caddy.
 The spec is the repo-root `CONTRACT.md`.
 
 ## Layout
