@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from flask import Flask, jsonify
 from werkzeug.exceptions import HTTPException
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 from dbcore.config import config
 
@@ -21,6 +22,13 @@ from .extensions import limiter
 
 def create_app() -> Flask:
     app = Flask(__name__)
+    # One trusted proxy (Caddy) in front: take the client address, scheme and
+    # host from the X-Forwarded-* headers it sets. Without this every request
+    # has Caddy's container IP as ``remote_addr`` and the per-IP rate limits
+    # become one shared bucket. Caddy >= 2.5 drops X-Forwarded-* headers that
+    # clients send unless they come from a configured trusted proxy, so the
+    # first hop is the real client.
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)  # type: ignore[method-assign]
     # Screenshots travel base64-encoded inside JSON; 1.5 MB of image is ~2 MB
     # of text plus the rest of the body. Anything bigger is a 413.
     app.config["MAX_CONTENT_LENGTH"] = 3 * 1024 * 1024
