@@ -24,9 +24,15 @@ export async function fetchBoard(slug: string): Promise<BoardResult> {
   if (!base) return { ok: false, status: 503 };
   try {
     const res = await fetch(`${base}/boards/${encodeURIComponent(slug)}`, { signal: AbortSignal.timeout(TIMEOUT_MS) });
-    if (!res.ok) return { ok: false, status: res.status };
+    if (!res.ok) {
+      // A plain 404 is a disabled or unknown board; anything else is worth a line in the log.
+      if (res.status !== 404) console.warn(`board ${slug}: the API answered ${res.status}`);
+      else console.warn(`board ${slug}: the API answered 404: ${(await res.text()).slice(0, 200)}`);
+      return { ok: false, status: res.status };
+    }
     return { ok: true, board: (await res.json()) as Board };
-  } catch {
+  } catch (err) {
+    console.warn(`board ${slug}: could not reach the API at ${base}: ${err}`);
     return { ok: false, status: 503 };
   }
 }
