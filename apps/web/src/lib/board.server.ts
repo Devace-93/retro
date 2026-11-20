@@ -2,7 +2,7 @@
  * Server-side board fetch (SSR only — imported from routeLoader$). Public
  * boards are rendered on the server so they carry OpenGraph tags and work
  * without JavaScript; the API is reached over the internal network via
- * `API_INTERNAL_URL` (compose: http://api:5000/api) with the same fallbacks as
+ * `API_INTERNAL_URL` (compose: http://retro-api:5000/api) with the same fallbacks as
  * features.server.ts.
  */
 import type { Board, Paginated, PublicChangelogEntry } from "./types";
