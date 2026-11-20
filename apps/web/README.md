@@ -57,7 +57,7 @@ optional `<base>-<COUNTRY>.ts` overrides.
 | `VITE_BILLING_ENABLED` | `true` | `false` hides every purchase surface (self-host) |
 | `VITE_INFO_URL` | `https://info.3m4.net` | Apps index linked from the footer |
 
-Runtime (SSR only): `API_INTERNAL_URL` (compose: `http://api:5000/api`) is used
+Runtime (SSR only): `API_INTERNAL_URL` (compose: `http://retro-api:5000/api`) is used
 by `routeLoader$`s to resolve features and public boards on the server;
 `PAYMENTS_INTERNAL_URL` (compose: `http://payments-api-1:5000`) feeds the
 `/sponsors` supporters list from the payments portal.
